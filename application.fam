@@ -1,0 +1,15 @@
+App(
+    appid="amiibo_zero",
+    name="Amiibo Zero",
+    apptype=FlipperAppType.EXTERNAL,
+    entry_point="amiibo_zero_app",
+    targets=["f7"],
+    stack_size=6 * 1024,
+    fap_version="0.1.0",
+    fap_category="NFC",
+    fap_description="Amiibo manager using on-device database, category browsing, and persistent write-back.",
+    fap_author="DanTheMan827",
+    fap_icon="icon.png",
+    sources=["src/*.c", "src/*.cpp", "third_party/lwjson/*.c"],
+    fap_libs=["mbedtls"],
+)
