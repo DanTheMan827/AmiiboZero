@@ -1,6 +1,6 @@
 # Amiibo Zero for Flipper Zero
 
-Amiibo Zero is a C Flipper Zero FAP for browsing Amiibo metadata, generating Amiibo data from an 8-byte figure ID plus a user-supplied `key_retail.bin`, emulating it, saving native `.nfc` files, showing game compatibility, and preserving game-side writes.
+Amiibo Zero is a Flipper Zero FAP for browsing Amiibo metadata, generating Amiibo data from an 8-byte figure ID plus a user-supplied `key_retail.bin`, emulating it, saving native `.nfc` files, showing game compatibility, and preserving game-side writes.
 
 ## Highlights
 
