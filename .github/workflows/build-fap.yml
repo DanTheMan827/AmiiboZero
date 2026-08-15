@@ -180,27 +180,15 @@ jobs:
         with:
           name: amiibo-zero-release
           path: release-dist
-
-      - name: Publish release
-        shell: bash
+          
+      - name: Public release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Amiibo Zero v${{ steps.release-version.outputs.version}}"
+          tag_name: "v${{ steps.release-version.outputs.version}}"
+          draft: false
+          generate_release_notes: true
+          files: |
+            release-dist/*.fap
         env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_VERSION: ${{ steps.release-version.outputs.version }}
-        run: |
-          set -euo pipefail
-
-          mapfile -d '' fap_files < <(find release-dist -type f -name '*.fap' -print0)
-          if (( ${#fap_files[@]} == 0 )); then
-            echo "::error::No .fap file was found in the release build artifact."
-            exit 1
-          fi
-
-          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
-            gh release upload "${GITHUB_REF_NAME}" "${fap_files[@]}" --clobber
-          else
-            gh release create "${GITHUB_REF_NAME}" \
-              "${fap_files[@]}" \
-              --verify-tag \
-              --generate-notes \
-              --title "Amiibo Zero ${RELEASE_VERSION}"
-          fi
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
