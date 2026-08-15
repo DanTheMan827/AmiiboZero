@@ -5,7 +5,7 @@
 
 #pragma once
 
-#include "amiibo_zero.h"
+#include "../amiibo_zero.h"
 
 #include <gui/canvas.h>
 #include <input/input.h>

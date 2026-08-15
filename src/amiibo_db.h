@@ -24,6 +24,12 @@ bool az_db_ensure_index(
     void* progress_context);
 
 /**
+ * @brief Remove the active index and every index-build temporary/backup file.
+ * @param storage Storage service used for file operations.
+ */
+void az_db_remove_index_files(Storage* storage);
+
+/**
  * @brief Read the visible category window surrounding a selection.
  * @param storage Storage service used for file operations.
  * @param selection Selected result ordinal.

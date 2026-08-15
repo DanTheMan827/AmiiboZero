@@ -6,7 +6,7 @@
 #include "amiibo_zero.h"
 #include "amiibo_crypto.h"
 #include "amiibo_storage.h"
-#include "ui_manager.h"
+#include "ui/ui_manager.h"
 
 #include <new>
 #include <string.h>

@@ -5,7 +5,7 @@
 
 #pragma once
 
-#include "amiibo_zero.h"
+#include "../amiibo_zero.h"
 #include "ui_screen.h"
 
 #include <gui/modules/byte_input.h>

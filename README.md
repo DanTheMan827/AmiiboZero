@@ -192,10 +192,10 @@ src/amiibo_crypto.cpp/.h   generation, authentication, decrypt/re-key/encrypt
 src/amiibo_db.cpp/.h       lwJSON scans and unified JSON seek index
 src/amiibo_nfc.cpp/.h      NTAG215 plus stock-derived NTAG I2C Plus 2K emulation
 src/amiibo_storage.cpp/.h  saved library, lock-on payloads, rename/delete, file naming
-src/ui_screen.cpp/.h       virtual Screen base class and Back/navigation contract
-src/ui_manager.cpp/.h      screen-stack owner, dispatcher bridge, modal inputs, UI actions
-src/ui_controls.cpp/.h     reusable drawing controls
-src/ui_screens.cpp/.h      concrete screen classes and per-screen input handlers
+src/ui/ui_screen.cpp/.h       virtual Screen base class and Back/navigation contract
+src/ui/ui_manager.cpp/.h      screen-stack owner, dispatcher bridge, modal inputs, UI actions
+src/ui/ui_controls.cpp/.h     reusable drawing controls
+src/ui/ui_screens.cpp/.h      concrete screen classes and per-screen input handlers
 third_party/lwjson/        minimal MIT lwJSON streaming subset
 tools/fetch_databases.py   raw database downloader only
 docs/DEVELOPMENT.md

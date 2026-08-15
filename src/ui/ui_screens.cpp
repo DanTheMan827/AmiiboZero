@@ -5,9 +5,9 @@
 
 #include "ui_screens.h"
 
-#include "amiibo_db.h"
-#include "amiibo_nfc.h"
-#include "amiibo_storage.h"
+#include "../amiibo_db.h"
+#include "../amiibo_nfc.h"
+#include "../amiibo_storage.h"
 #include "ui_controls.h"
 #include "ui_manager.h"
 

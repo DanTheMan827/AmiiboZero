@@ -48,7 +48,17 @@
 /** @brief Constant used for index magic. */
 #define AZ_INDEX_MAGIC "AZIDX34"
 /** @brief Constant used for index version. */
-#define AZ_INDEX_VERSION 9U
+#define AZ_INDEX_VERSION 10U
+
+/** @brief Remove the active index and all index-build artifacts. */
+void az_db_remove_index_files(Storage* storage) {
+    if(!storage) return;
+    storage_common_remove(storage, AZ_INDEX_FILE);
+    storage_common_remove(storage, AZ_INDEX_TMP);
+    storage_common_remove(storage, AZ_INDEX_BACKUP);
+    storage_common_remove(storage, AZ_INDEX_RAW);
+    storage_common_remove(storage, AZ_INDEX_SORT_RUNS);
+}
 
 /** @brief Compact fingerprint used to detect changes in a JSON source file. */
 typedef struct {
@@ -757,6 +767,41 @@ static bool az_lw_is_amiibo_entry(
 }
 
 /**
+ * @brief Remove a trailing version-3 variant suffix that begins with "(&".
+ * @details The name is scanned in place without a temporary buffer. If "(&" occurs and the
+ *          figure name ends with ')', every byte from the opening '(' through the end of the suffix is
+ *          replaced with NUL. Examples include "(& Tank Star)" and "(& Warp Star)".
+ * @param figure Figure whose decoded name may need normalization.
+ */
+static void az_strip_v3_name_suffix(AzFigure* figure) {
+    if(!figure || figure->id[7] != 0x03U) return;
+
+    size_t suffix_start = sizeof(figure->name);
+    size_t name_end = 0U;
+
+    for(size_t i = 0; i < sizeof(figure->name); ++i) {
+        if(figure->name[i] == '\0') {
+            name_end = i;
+            break;
+        }
+
+        if(suffix_start == sizeof(figure->name) && i + 1U < sizeof(figure->name) &&
+           figure->name[i] == '(' && figure->name[i + 1U] == '&') {
+            suffix_start = i;
+        }
+    }
+
+    if(suffix_start == sizeof(figure->name) || name_end == 0U ||
+       figure->name[name_end - 1U] != ')') {
+        return;
+    }
+
+    for(size_t i = suffix_start; i < name_end; ++i) {
+        figure->name[i] = '\0';
+    }
+}
+
+/**
  * @brief Consume one streaming JSON event while building figure records.
  * @param parser Streaming JSON parser state.
  * @param type Type or event code to interpret.
@@ -831,6 +876,7 @@ static void az_figure_build_event(lwjson_stream_parser_t* parser, lwjson_stream_
                 context->current.name,
                 sizeof(context->current.name),
                 context->current.id_hex);
+        az_strip_v3_name_suffix(&context->current);
         AzCategory* category = az_find_category(
             context->categories, *context->category_count, context->current.category);
         if(!category) {

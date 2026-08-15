@@ -5,10 +5,10 @@
 
 #include "ui_manager.h"
 
-#include "amiibo_crypto.h"
-#include "amiibo_db.h"
-#include "amiibo_nfc.h"
-#include "amiibo_storage.h"
+#include "../amiibo_crypto.h"
+#include "../amiibo_db.h"
+#include "../amiibo_nfc.h"
+#include "../amiibo_storage.h"
 #include "ui_screens.h"
 
 #include <new>
