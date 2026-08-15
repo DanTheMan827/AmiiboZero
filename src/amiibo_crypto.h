@@ -7,6 +7,10 @@
 
 #include "amiibo_zero.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /**
  * @brief Load retail Amiibo key material from persistent storage.
  * @param storage Storage service used for file operations.
@@ -96,3 +100,7 @@ void az_raw_uid_to_nfc_uid(const uint8_t raw_uid[9], uint8_t uid7[7]);
  * @param password Four-byte password output buffer.
  */
 void az_tag_password(const uint8_t raw_uid[9], uint8_t password[4]);
+
+#ifdef __cplusplus
+}
+#endif

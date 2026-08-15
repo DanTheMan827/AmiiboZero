@@ -39,7 +39,7 @@ public:
     UiManager& operator=(const UiManager&) = delete;
 
     /**
-     * @brief Allocate and register Flipper views and push the root screen.
+     * @brief Allocate and register Flipper views and push the appropriate initial screen.
      * @return true when initialization succeeds.
      */
     bool init();
@@ -65,8 +65,8 @@ public:
     bool push(Screen* screen);
 
     /**
-     * @brief Pop the top screen.
-     * @details The root screen is never removed; attempting to pop it stops the dispatcher instead.
+     * @brief Pop and destroy the top screen.
+     * @details When the final screen is removed, the dispatcher is stopped and the app exits.
      * @return true when a screen was removed.
      */
     bool pop();
@@ -80,7 +80,7 @@ public:
 
     /**
      * @brief Request one or more pops after the active input callback returns.
-     * @param count Number of screens to remove, subject to preserving the root.
+     * @param count Number of screens to remove. Removing the final screen exits the app.
      */
     void schedulePop(uint8_t count = 1);
 

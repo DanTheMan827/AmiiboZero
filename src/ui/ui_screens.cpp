@@ -17,36 +17,64 @@
 #include <string.h>
 
 namespace {
+/** @brief Logical action represented by one row on FigureScreen. */
+enum class FigureAction : uint8_t {
+    Emulate,
+    SaveAndEmulate,
+    Details,
+    Compatibility,
+    ChangeLockOn,
+    Rename,
+    FreshCopy,
+    Delete,
+};
+
 /** @brief Return the number of actions available for a saved/library figure variant. */
-uint8_t figureActionCount(bool saved, bool v3) {
-    return saved ? (v3 ? 7U : 6U) : 3U;
+uint8_t figureActionCount(bool saved, bool v3, bool has_games) {
+    if(!saved) return has_games ? 3U : 2U;
+    uint8_t count = v3 ? 6U : 5U;
+    if(has_games) ++count;
+    return count;
 }
 
-/** @brief Return the display label for one figure action index. */
-const char* figureAction(bool saved, bool v3, uint8_t index) {
-    if(saved) {
-        static const char* standard_actions[] = {
-            "Emulate + autosave",
-            "Dump details",
-            "Compatibility",
-            "Rename",
-            "Fresh copy",
-            "Delete",
-        };
-        static const char* v3_actions[] = {
-            "Emulate + autosave",
-            "Dump details",
-            "Compatibility",
-            "Change lock-on",
-            "Rename",
-            "Fresh copy",
-            "Delete",
-        };
-        if(v3) return index < COUNT_OF(v3_actions) ? v3_actions[index] : "";
-        return index < COUNT_OF(standard_actions) ? standard_actions[index] : "";
+/** @brief Map one visible FigureScreen row to its logical action. */
+FigureAction figureActionAt(bool saved, bool v3, bool has_games, uint8_t index) {
+    if(!saved) {
+        if(index == 0U) return FigureAction::Emulate;
+        if(index == 1U) return FigureAction::SaveAndEmulate;
+        return FigureAction::Compatibility;
     }
-    static const char* actions[] = {"Emulate once", "Save + emulate", "Compatibility"};
-    return index < COUNT_OF(actions) ? actions[index] : "";
+
+    uint8_t row = 0U;
+    if(index == row++) return FigureAction::Emulate;
+    if(index == row++) return FigureAction::Details;
+    if(has_games && index == row++) return FigureAction::Compatibility;
+    if(v3 && index == row++) return FigureAction::ChangeLockOn;
+    if(index == row++) return FigureAction::Rename;
+    if(index == row++) return FigureAction::FreshCopy;
+    return FigureAction::Delete;
+}
+
+/** @brief Return the display label for one logical FigureScreen action. */
+const char* figureActionLabel(FigureAction action) {
+    switch(action) {
+    case FigureAction::Emulate: return "Emulate + autosave";
+    case FigureAction::SaveAndEmulate: return "Save + emulate";
+    case FigureAction::Details: return "Dump details";
+    case FigureAction::Compatibility: return "Compatibility";
+    case FigureAction::ChangeLockOn: return "Change lock-on";
+    case FigureAction::Rename: return "Rename";
+    case FigureAction::FreshCopy: return "Fresh copy";
+    case FigureAction::Delete: return "Delete";
+    }
+    return "";
+}
+
+/** @brief Return the context-sensitive label for one FigureScreen row. */
+const char* figureAction(bool saved, bool v3, bool has_games, uint8_t index) {
+    const FigureAction action = figureActionAt(saved, v3, has_games, index);
+    if(!saved && action == FigureAction::Emulate) return "Emulate once";
+    return figureActionLabel(action);
 }
 
 /** @brief Return the user-facing label for a database worker stage. */
@@ -71,6 +99,26 @@ void handleScrollInput(uint16_t& scroll, const InputEvent& event) {
     }
 }
 } // namespace
+
+ScreenId MissingDataScreen::id() const {
+    return ScreenId::MissingData;
+}
+
+void MissingDataScreen::draw(Canvas* canvas) {
+    UiControls::header(canvas, ui_, "Required files missing");
+    UiControls::wrappedText(
+        canvas,
+        "SD:/apps_data/amiibo_zero/\nRequired: key_retail.bin\nRequired: amiibo.json\nOptional: games_info.json",
+        20,
+        UiControls::DetailLines,
+        120,
+        scroll_);
+    UiControls::footer(canvas, "Exit", "", "");
+}
+
+bool MissingDataScreen::handleInput(const InputEvent&) {
+    return true;
+}
 
 ScreenId HomeScreen::id() const {
     return ScreenId::Home;
@@ -113,9 +161,6 @@ bool HomeScreen::handleInput(const InputEvent& event) {
     return true;
 }
 
-BackAction HomeScreen::onBack() {
-    return BackAction::Exit;
-}
 
 ScreenId CategoriesScreen::id() const {
     return ScreenId::Categories;
@@ -557,7 +602,8 @@ void FigureScreen::draw(Canvas* canvas) {
     UiControls::fitted(canvas, ui_, 2, 29, id_line, 124);
 
     const bool v3 = az_figure_is_v3(app.current_figure.id);
-    const uint8_t count = figureActionCount(app.current_is_saved, v3);
+    const bool has_games = app.data_files.games_json;
+    const uint8_t count = figureActionCount(app.current_is_saved, v3, has_games);
     uint8_t start_row = selection_ >= 2 ? static_cast<uint8_t>(selection_ - 2) : 0;
     if(count > 3 && start_row + 3 > count) start_row = static_cast<uint8_t>(count - 3);
     for(uint8_t row = 0; row < 3 && start_row + row < count; ++row) {
@@ -570,11 +616,11 @@ void FigureScreen::draw(Canvas* canvas) {
             canvas_draw_rbox(canvas, 1, top, 124, 8, 2);
             canvas_set_color(canvas, ColorWhite);
             UiControls::marquee(
-                canvas, ui_, 4, baseline, figureAction(app.current_is_saved, v3, index), 118);
+                canvas, ui_, 4, baseline, figureAction(app.current_is_saved, v3, has_games, index), 118);
             canvas_set_color(canvas, ColorBlack);
         } else {
             UiControls::fitted(
-                canvas, ui_, 4, baseline, figureAction(app.current_is_saved, v3, index), 118);
+                canvas, ui_, 4, baseline, figureAction(app.current_is_saved, v3, has_games, index), 118);
         }
     }
     if(count > 3) elements_scrollbar_pos(canvas, 125, 31, 24, selection_, count);
@@ -583,41 +629,46 @@ void FigureScreen::draw(Canvas* canvas) {
 bool FigureScreen::handleInput(const InputEvent& event) {
     AmiiboZeroApp& app = ui_.app();
     const bool v3 = az_figure_is_v3(app.current_figure.id);
-    const uint8_t action_count = figureActionCount(app.current_is_saved, v3);
+    const bool has_games = app.data_files.games_json;
+    const uint8_t action_count = figureActionCount(app.current_is_saved, v3, has_games);
     if(event.key == InputKeyUp) {
         moveSelection(-1, action_count);
     } else if(event.key == InputKeyDown) {
         moveSelection(1, action_count);
-    } else if(isShortOk(event)) {
-        if(app.current_is_saved) {
-            if(selection_ == 0) {
-                ui_.requestEmulation(true, false);
-            } else if(selection_ == 1) {
-                Screen* next = new(std::nothrow) DumpInfoScreen(ui_);
-                if(!next || !ui_.push(next)) ui_.toast("Could not open details");
-            } else if(selection_ == 2) {
-                Screen* next = new(std::nothrow) GamesScreen(ui_);
-                if(!next || !ui_.push(next)) ui_.toast("Could not open compatibility");
-            } else if(v3 && selection_ == 3) {
-                Screen* next = new(std::nothrow) LockOnScreen(ui_, LockOnAction::ReplaceSaved);
-                if(!next || !ui_.push(next)) ui_.toast("Could not open lock-on list");
-            } else if((v3 && selection_ == 4) || (!v3 && selection_ == 3)) {
-                ui_.openRenameInput();
-            } else if((v3 && selection_ == 5) || (!v3 && selection_ == 4)) {
-                ui_.requestEmulation(true, true);
-            } else if((v3 && selection_ == 6) || (!v3 && selection_ == 5)) {
-                Screen* next = new(std::nothrow) ConfirmDeleteScreen(ui_);
-                if(!next || !ui_.push(next)) ui_.toast("Could not open confirmation");
-            }
-        } else {
-            if(selection_ == 0) {
-                ui_.requestEmulation(false, true);
-            } else if(selection_ == 1) {
-                ui_.requestEmulation(true, true);
-            } else if(selection_ == 2) {
-                Screen* next = new(std::nothrow) GamesScreen(ui_);
-                if(!next || !ui_.push(next)) ui_.toast("Could not open compatibility");
-            }
+    } else if(isShortOk(event) && selection_ < action_count) {
+        switch(figureActionAt(app.current_is_saved, v3, has_games, static_cast<uint8_t>(selection_))) {
+        case FigureAction::Emulate:
+            ui_.requestEmulation(app.current_is_saved, !app.current_is_saved);
+            break;
+        case FigureAction::SaveAndEmulate:
+            ui_.requestEmulation(true, true);
+            break;
+        case FigureAction::Details: {
+            Screen* next = new(std::nothrow) DumpInfoScreen(ui_);
+            if(!next || !ui_.push(next)) ui_.toast("Could not open details");
+            break;
+        }
+        case FigureAction::Compatibility: {
+            Screen* next = new(std::nothrow) GamesScreen(ui_);
+            if(!next || !ui_.push(next)) ui_.toast("Could not open compatibility");
+            break;
+        }
+        case FigureAction::ChangeLockOn: {
+            Screen* next = new(std::nothrow) LockOnScreen(ui_, LockOnAction::ReplaceSaved);
+            if(!next || !ui_.push(next)) ui_.toast("Could not open lock-on list");
+            break;
+        }
+        case FigureAction::Rename:
+            ui_.openRenameInput();
+            break;
+        case FigureAction::FreshCopy:
+            ui_.requestEmulation(true, true);
+            break;
+        case FigureAction::Delete: {
+            Screen* next = new(std::nothrow) ConfirmDeleteScreen(ui_);
+            if(!next || !ui_.push(next)) ui_.toast("Could not open confirmation");
+            break;
+        }
         }
         return true;
     }
@@ -683,6 +734,7 @@ bool DumpInfoScreen::handleInput(const InputEvent& event) {
 }
 
 GamesScreen::GamesScreen(UiManager& ui) : Screen(ui), entries_(nullptr), count_(0) {
+    if(!ui_.app().data_files.games_json) return;
     entries_ = new(std::nothrow) AzGame[AZ_MAX_GAMES]{};
     if(!entries_) {
         ui_.toast("Not enough memory for games");
@@ -807,11 +859,10 @@ void StatusScreen::draw(Canvas* canvas) {
         text,
         sizeof(text),
         "%s\n%s\n%s\n%s\nIndex: %s (%lu figures)\nOK reloads keys and forces a background index rebuild.",
-        app.keys.valid ? "Keys: ready" : "Keys: missing/invalid",
-        storage_file_exists(app.storage, AZ_AMIIBO_JSON) ? "Amiibo JSON: found" :
-                                                          "Amiibo JSON: missing",
-        storage_file_exists(app.storage, AZ_GAMES_JSON) ? "Games JSON: found" :
-                                                         "Games JSON: missing",
+        app.keys.valid ? "Keys: ready" :
+                         (app.data_files.key_retail ? "Keys: invalid" : "Keys: missing"),
+        app.data_files.amiibo_json ? "Amiibo JSON: found" : "Amiibo JSON: missing",
+        app.data_files.games_json ? "Games JSON: found" : "Games JSON: optional / missing",
         "Index identity: size + samples",
         app.index_ready ? "ready" : "unavailable",
         static_cast<unsigned long>(app.index_count));

@@ -76,12 +76,14 @@ bool UiManager::init() {
     view_dispatcher_add_view(dispatcher_, ViewByteInput, byte_input_get_view(byte_input_));
     view_dispatcher_attach_to_gui(dispatcher_, app_.gui, ViewDispatcherTypeFullscreen);
 
-    Screen* home = new(std::nothrow) HomeScreen(*this);
-    if(!home) {
+    Screen* initial = az_storage_required_data_present(&app_.data_files) ?
+                          static_cast<Screen*>(new(std::nothrow) HomeScreen(*this)) :
+                          static_cast<Screen*>(new(std::nothrow) MissingDataScreen(*this));
+    if(!initial) {
         deinit();
         return false;
     }
-    if(!push(home)) {
+    if(!push(initial)) {
         deinit();
         return false;
     }
@@ -168,16 +170,20 @@ bool UiManager::push(Screen* screen) {
 }
 
 bool UiManager::pop() {
-    if(depth_ <= 1) {
-        stop();
-        return false;
-    }
+    if(depth_ == 0) return false;
 
     Screen* screen = stack_[depth_ - 1];
     stack_[depth_ - 1] = nullptr;
     --depth_;
     destroyScreen(screen);
-    if(top()) top()->onRevealed();
+
+    if(depth_ == 0) {
+        clearPendingNavigation();
+        stop();
+        return true;
+    }
+
+    top()->onRevealed();
     resetAnimation();
     refresh();
     return true;
@@ -650,7 +656,7 @@ int32_t UiManager::databaseWorker(void* context) {
 }
 
 bool UiManager::startDatabasePrepare(bool force) {
-    if(app_.db_thread) return false;
+    if(app_.db_thread || !az_storage_required_data_present(&app_.data_files)) return false;
 
     /* Index generation never uses NFC. Free it before allocating the worker stack and sort heap. */
     releaseNfcResourcesForDatabase();
@@ -816,7 +822,11 @@ void UiManager::applyPendingNavigation() {
         return;
     }
 
-    while(pop_count-- && depth_ > 1) pop();
+    while(pop_count-- && depth_ > 0) pop();
+    if(depth_ == 0) {
+        if(push_screen) delete push_screen;
+        return;
+    }
     if(push_screen) {
         if(!push(push_screen)) toast("Could not open screen");
     }

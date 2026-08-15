@@ -15,7 +15,8 @@ class UiManager;
 
 /** @brief Stable identities for the custom screens managed by UiManager. */
 enum class ScreenId : uint8_t {
-    Home, /**< Root application menu. */
+    MissingData, /**< Blocking required-data-files message. */
+    Home, /**< Main application menu. */
     Categories, /**< Amiibo-series/category browser. */
     Figures, /**< Figures within the selected category. */
     SearchResults, /**< Figure search results. */

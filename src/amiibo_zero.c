@@ -1,32 +1,32 @@
 /**
- * @file amiibo_zero.cpp
+ * @file amiibo_zero.c
  * @brief Application entry point and lifetime management.
  */
 
 #include "amiibo_zero.h"
 #include "amiibo_crypto.h"
+#include "amiibo_db.h"
 #include "amiibo_storage.h"
-#include "ui/ui_manager.h"
+#include "ui/ui_bridge.h"
 
-#include <new>
+#include <stdlib.h>
 #include <string.h>
 
-namespace {
 /** @brief Release NFC-only resources so a database rebuild starts from a clean heap. */
-void az_release_nfc_runtime(AmiiboZeroApp* app) {
+static void az_release_nfc_runtime(AmiiboZeroApp* app) {
     if(!app) return;
 
     if(app->nfc_device) {
         nfc_device_free(app->nfc_device);
-        app->nfc_device = nullptr;
+        app->nfc_device = NULL;
     }
     if(app->nfc) {
         nfc_free(app->nfc);
-        app->nfc = nullptr;
+        app->nfc = NULL;
     }
 
-    app->listener = nullptr;
-    app->v3_tx_buffer = nullptr;
+    app->listener = NULL;
+    app->v3_tx_buffer = NULL;
     app->v3_i2c_listener = false;
     app->v3_sector_select_pending = false;
     app->v3_authenticated = false;
@@ -38,7 +38,7 @@ void az_release_nfc_runtime(AmiiboZeroApp* app) {
 }
 
 /** @brief Clear state derived from an index before recreating the UI for a forced rebuild. */
-void az_reset_database_runtime(AmiiboZeroApp* app) {
+static void az_reset_database_runtime(AmiiboZeroApp* app) {
     if(!app) return;
 
     memset(&app->current_category, 0, sizeof(app->current_category));
@@ -52,7 +52,7 @@ void az_reset_database_runtime(AmiiboZeroApp* app) {
 
     app->index_ready = false;
     app->index_count = 0U;
-    app->db_thread = nullptr;
+    app->db_thread = NULL;
     app->db_thread_done = false;
     app->db_thread_result = false;
     app->db_thread_count = 0U;
@@ -60,60 +60,44 @@ void az_reset_database_runtime(AmiiboZeroApp* app) {
     app->db_progress = 0U;
     app->db_progress_stage = AzDbProgressChecking;
 }
-} // namespace
 
-extern "C" int32_t amiibo_zero_app(void* p) {
+int32_t amiibo_zero_app(void* p) {
     UNUSED(p);
 
-    auto* app = new(std::nothrow) AmiiboZeroApp{};
+    AmiiboZeroApp* app = calloc(1, sizeof(AmiiboZeroApp));
     if(!app) return -1;
 
-    app->storage = static_cast<Storage*>(furi_record_open(RECORD_STORAGE));
-    app->gui = static_cast<Gui*>(furi_record_open(RECORD_GUI));
+    app->storage = furi_record_open(RECORD_STORAGE);
+    app->gui = furi_record_open(RECORD_GUI);
     az_storage_init(app->storage);
-    app->keys.valid = az_keys_load(app->storage, &app->keys);
+    az_storage_check_data_files(app->storage, &app->data_files);
+    app->keys.valid = app->data_files.key_retail && az_keys_load(app->storage, &app->keys);
 
     bool force_database_rebuild = false;
     bool fatal_error = false;
 
     while(true) {
-        /*
-         * Each pass owns a completely fresh UI session. Setup/Status refresh exits the current
-         * dispatcher and returns here so every screen, view, modal control, NFC object, and their
-         * heap fragments are gone before the forced database worker is created.
-         */
-        app->ui = new(std::nothrow) UiManager(*app);
-        if(!app->ui || !app->ui->init()) {
-            delete app->ui;
-            app->ui = nullptr;
+        bool restart_for_database = false;
+        if(!az_ui_run_session(app, force_database_rebuild, &restart_for_database)) {
             fatal_error = true;
             break;
         }
 
-        if(!app->ui->startDatabasePrepare(force_database_rebuild)) {
-            app->ui->toast(force_database_rebuild ? "Could not start refresh" :
-                                                    "Could not start DB check");
-        }
-        force_database_rebuild = false;
-
-        app->ui->run();
-
-        const bool restart_for_database = app->ui->databaseRefreshRequested();
-        app->ui->stopEmulation();
-        delete app->ui;
-        app->ui = nullptr;
         az_release_nfc_runtime(app);
-
         if(!restart_for_database) break;
 
+        /* Manual refresh starts from no index state and no stale build artifacts. */
+        az_db_remove_index_files(app->storage);
         az_reset_database_runtime(app);
-        app->keys.valid = az_keys_load(app->storage, &app->keys);
+        az_storage_check_data_files(app->storage, &app->data_files);
+        memset(&app->keys, 0, sizeof(app->keys));
+        app->keys.valid = app->data_files.key_retail && az_keys_load(app->storage, &app->keys);
         force_database_rebuild = true;
     }
 
     az_release_nfc_runtime(app);
     furi_record_close(RECORD_GUI);
     furi_record_close(RECORD_STORAGE);
-    delete app;
+    free(app);
     return fatal_error ? -1 : 0;
 }

@@ -1,5 +1,5 @@
 /**
- * @file amiibo_db.cpp
+ * @file amiibo_db.c
  * @brief Indexed Amiibo metadata database access.
  * @details Builds and validates the compact on-device index, streams JSON sources, and serves category, figure, search, and game queries.
  */
@@ -548,8 +548,8 @@ static bool az_scan_json_file(
         return false;
     }
 
-    auto* parser = static_cast<lwjson_stream_parser_t*>(malloc(sizeof(lwjson_stream_parser_t)));
-    auto* buffer = static_cast<uint8_t*>(malloc(AZ_JSON_FILE_BUFFER));
+    lwjson_stream_parser_t* parser = malloc(sizeof(lwjson_stream_parser_t));
+    uint8_t* buffer = malloc(AZ_JSON_FILE_BUFFER);
     if(!parser || !buffer) {
         free(buffer);
         free(parser);
@@ -635,7 +635,7 @@ static bool az_scan_json_range(
         return false;
     }
     bool ok = storage_file_seek(file, offset, true);
-    auto* parser = ok ? static_cast<lwjson_stream_parser_t*>(malloc(sizeof(lwjson_stream_parser_t))) : nullptr;
+    lwjson_stream_parser_t* parser = ok ? malloc(sizeof(lwjson_stream_parser_t)) : NULL;
     if(!parser) ok = false;
     if(ok) {
         ok = lwjson_stream_init(parser, callback) == lwjsonOK &&
@@ -807,7 +807,7 @@ static void az_strip_v3_name_suffix(AzFigure* figure) {
  * @param type Type or event code to interpret.
  */
 static void az_figure_build_event(lwjson_stream_parser_t* parser, lwjson_stream_type_t type) {
-    auto* context = static_cast<AzFigureBuildContext*>(lwjson_stream_get_user_data(parser));
+    AzFigureBuildContext* context = lwjson_stream_get_user_data(parser);
     if(!context) return;
 
     if(type == LWJSON_STREAM_TYPE_STRING && az_lw_key_is(parser, 1, "amiibo_series")) {
@@ -892,7 +892,7 @@ static void az_figure_build_event(lwjson_stream_parser_t* parser, lwjson_stream_
             return;
         }
         if(category->count < UINT16_MAX) category->count++;
-        AzIndexFigureRecord record = {};
+        AzIndexFigureRecord record = {0};
         record.figure = context->current;
         if(!az_write_exact(context->raw_file, &record, sizeof(record))) {
             context->control.failed = true;
@@ -909,7 +909,7 @@ static void az_figure_build_event(lwjson_stream_parser_t* parser, lwjson_stream_
  * @param type Type or event code to interpret.
  */
 static void az_game_index_event(lwjson_stream_parser_t* parser, lwjson_stream_type_t type) {
-    auto* context = static_cast<AzGameIndexBuildContext*>(lwjson_stream_get_user_data(parser));
+    AzGameIndexBuildContext* context = lwjson_stream_get_user_data(parser);
     if(!context) return;
     if(type == LWJSON_STREAM_TYPE_OBJECT) {
         const char* entry = az_lw_key(parser, 0);
@@ -1219,8 +1219,7 @@ static uint32_t az_figure_batch_allocate(
         (target_capacity + AZ_SORT_BATCH_CHUNK_RECORDS - 1U) / AZ_SORT_BATCH_CHUNK_RECORDS;
     if(chunk_slots32 == 0U || chunk_slots32 > UINT16_MAX) return 0U;
 
-    batch->chunks = static_cast<AzIndexFigureRecord**>(
-        calloc((size_t)chunk_slots32, sizeof(*batch->chunks)));
+    batch->chunks = calloc((size_t)chunk_slots32, sizeof(*batch->chunks));
     if(!batch->chunks) return 0U;
     batch->chunk_slots = (uint16_t)chunk_slots32;
 
@@ -1233,7 +1232,7 @@ static uint32_t az_figure_batch_allocate(
         const size_t free_heap = memmgr_get_free_heap();
         if(free_heap <= reserve || free_heap - reserve < chunk_bytes) break;
 
-        auto* chunk = static_cast<AzIndexFigureRecord*>(malloc(chunk_bytes));
+        AzIndexFigureRecord* chunk = malloc(chunk_bytes);
         if(!chunk) break;
 
         batch->chunks[batch->chunk_count++] = chunk;
@@ -1388,8 +1387,8 @@ static bool az_write_sorted_figure_batches(
         return false;
     }
 
-    auto* scan = static_cast<AzIndexFigureRecord*>(
-        malloc((size_t)AZ_SORT_BATCH_SCAN_RECORDS * sizeof(AzIndexFigureRecord)));
+    AzIndexFigureRecord* scan =
+        malloc((size_t)AZ_SORT_BATCH_SCAN_RECORDS * sizeof(AzIndexFigureRecord));
     if(!scan) {
         storage_file_close(source);
         storage_file_free(source);
@@ -1572,9 +1571,8 @@ static bool az_create_sorted_runs(
     bool ok = source && destination &&
               storage_file_open(source, AZ_INDEX_RAW, FSAM_READ, FSOM_OPEN_EXISTING) &&
               storage_file_open(destination, AZ_INDEX_SORT_RUNS, FSAM_WRITE, FSOM_CREATE_ALWAYS);
-    auto* records = ok ? static_cast<AzIndexFigureRecord*>(
-                             malloc(AZ_SORT_RUN_RECORDS * sizeof(AzIndexFigureRecord))) :
-                         nullptr;
+    AzIndexFigureRecord* records =
+        ok ? malloc(AZ_SORT_RUN_RECORDS * sizeof(AzIndexFigureRecord)) : NULL;
     if(!records) ok = false;
 
     uint32_t processed = 0;
@@ -1803,7 +1801,7 @@ static bool az_copy_file_bytes(
         if(source) storage_file_free(source);
         return false;
     }
-    auto* buffer = static_cast<uint8_t*>(malloc(AZ_COPY_BUFFER));
+    uint8_t* buffer = malloc(AZ_COPY_BUFFER);
     bool ok = buffer != NULL;
     uint32_t copied = 0;
     while(ok && copied < byte_count) {
@@ -1849,7 +1847,7 @@ static bool az_index_build(
     memset(&games_before, 0, sizeof(games_before));
     bool has_games = az_source_stamp(storage, AZ_GAMES_JSON, &games_before);
 
-    auto* categories = static_cast<AzCategory*>(calloc(AZ_MAX_CATEGORIES, sizeof(AzCategory)));
+    AzCategory* categories = calloc(AZ_MAX_CATEGORIES, sizeof(AzCategory));
     if(!categories) return false;
     uint16_t category_count = 0;
     uint32_t figure_count = 0;
@@ -1862,7 +1860,7 @@ static bool az_index_build(
         ok = false;
     }
     if(ok) {
-        AzFigureBuildContext figure_context = {};
+        AzFigureBuildContext figure_context = {0};
         figure_context.raw_file = raw_figures;
         figure_context.categories = categories;
         figure_context.category_capacity = AZ_MAX_CATEGORIES;
@@ -1931,7 +1929,7 @@ static bool az_index_build(
 
     uint32_t first_figure = 0;
     for(uint16_t i = 0; ok && i < category_count; i++) {
-        AzIndexCategoryRecord record = {};
+        AzIndexCategoryRecord record = {0};
         record.category = categories[i];
         record.first_figure = first_figure;
         ok = az_write_exact(index, &record, sizeof(record));
@@ -1980,7 +1978,7 @@ static bool az_index_build(
     if(ok && storage_file_tell(index) != header.games_offset) ok = false;
 
     if(ok && has_games) {
-        AzGameIndexBuildContext game_context = {};
+        AzGameIndexBuildContext game_context = {0};
         game_context.output_file = index;
         AzProgressReporter games_progress;
         az_progress_reporter_init(
@@ -2531,7 +2529,7 @@ static void az_game_flush_pending(AzGamesRangeContext* context) {
  * @param type Type or event code to interpret.
  */
 static void az_games_range_event(lwjson_stream_parser_t* parser, lwjson_stream_type_t type) {
-    auto* context = static_cast<AzGamesRangeContext*>(lwjson_stream_get_user_data(parser));
+    AzGamesRangeContext* context = lwjson_stream_get_user_data(parser);
     if(!context) return;
     if(type == LWJSON_STREAM_TYPE_OBJECT) {
         const char* nearest = az_lw_key(parser, 0);
@@ -2608,7 +2606,7 @@ static bool az_parse_game_ref(
     AzGame* games,
     uint16_t max_games,
     uint16_t* in_out_count) {
-    auto* context = static_cast<AzGamesRangeContext*>(calloc(1, sizeof(AzGamesRangeContext)));
+    AzGamesRangeContext* context = calloc(1, sizeof(AzGamesRangeContext));
     if(!context) return false;
     context->games = games;
     context->max_games = max_games;

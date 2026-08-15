@@ -1,5 +1,5 @@
 /**
- * @file amiibo_storage.cpp
+ * @file amiibo_storage.c
  * @brief Persistent file and Lock-On storage helpers.
  * @details Scans saved tags and Lock-On payloads, validates companion data, and manages file naming, rename, and deletion operations.
  */
@@ -10,6 +10,30 @@
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
+
+/**
+ * @brief Refresh presence information for the external application data files.
+ * @param storage Storage service used for file operations.
+ * @param out Destination status structure.
+ */
+void az_storage_check_data_files(Storage* storage, AzDataFiles* out) {
+    if(!out) return;
+    memset(out, 0, sizeof(*out));
+    if(!storage) return;
+
+    out->key_retail = storage_file_exists(storage, AZ_KEYS_FILE);
+    out->amiibo_json = storage_file_exists(storage, AZ_AMIIBO_JSON);
+    out->games_json = storage_file_exists(storage, AZ_GAMES_JSON);
+}
+
+/**
+ * @brief Return whether every required external data file is present.
+ * @param files Data-file presence state to inspect.
+ * @return true when key_retail.bin and amiibo.json are both present.
+ */
+bool az_storage_required_data_present(const AzDataFiles* files) {
+    return files && files->key_retail && files->amiibo_json;
+}
 
 /**
  * @brief Build the absolute figures-directory path for a saved filename.

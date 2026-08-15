@@ -7,6 +7,10 @@
 
 #include "amiibo_zero.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /**
  * @brief Ensure the binary metadata index exists and matches the current JSON sources.
  * @param storage Storage service used for file operations.
@@ -140,3 +144,7 @@ bool az_db_load_games(
     AzGame* out_games,
     uint16_t max_games,
     uint16_t* out_count);
+
+#ifdef __cplusplus
+}
+#endif

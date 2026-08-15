@@ -1,5 +1,5 @@
 /**
- * @file amiibo_nfc.cpp
+ * @file amiibo_nfc.c
  * @brief NFC device construction and Amiibo emulation.
  * @details Creates standard and version-3 tag images, implements listener behavior, validates dumps, and extracts tag metadata.
  */
@@ -884,10 +884,10 @@ static NfcCommand az_v3_reset_listener_state(AmiiboZeroApp* app) {
  * @return The computed result value.
  */
 static NfcCommand az_v3_listener_callback(NfcGenericEvent event, void* context) {
-    auto* app = static_cast<AmiiboZeroApp*>(context);
+    AmiiboZeroApp* app = context;
     if(!app || event.protocol != NfcProtocolIso14443_3a || !event.event_data) return NfcCommandStop;
 
-    const auto* iso_event = static_cast<const Iso14443_3aListenerEvent*>(event.event_data);
+    const Iso14443_3aListenerEvent* iso_event = event.event_data;
     if(iso_event->type == Iso14443_3aListenerEventTypeReceivedStandardFrame) {
         if(!iso_event->data || !iso_event->data->buffer) return NfcCommandSleep;
         const BitBuffer* buffer = iso_event->data->buffer;

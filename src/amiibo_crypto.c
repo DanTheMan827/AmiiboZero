@@ -1,5 +1,5 @@
 /**
- * @file amiibo_crypto.cpp
+ * @file amiibo_crypto.c
  * @brief Amiibo dump cryptography and UID generation.
  * @details Loads retail key material, derives per-tag keys, encrypts or decrypts dumps, and generates compatible identities.
  */

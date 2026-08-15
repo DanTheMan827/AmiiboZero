@@ -7,7 +7,19 @@
 
 #include "ui_screen.h"
 
-/** @brief Root menu screen. Back exits the application instead of popping the root. */
+/** @brief Blocking startup screen shown when required external data files are absent. */
+class MissingDataScreen final : public Screen {
+public:
+    using Screen::Screen;
+    /** @copydoc Screen::id */
+    ScreenId id() const override;
+    /** @copydoc Screen::draw */
+    void draw(Canvas* canvas) override;
+    /** @copydoc Screen::handleInput */
+    bool handleInput(const InputEvent& event) override;
+};
+
+/** @brief Main application menu screen. */
 class HomeScreen final : public Screen {
 public:
     using Screen::Screen;
@@ -17,8 +29,6 @@ public:
     void draw(Canvas* canvas) override;
     /** @copydoc Screen::handleInput */
     bool handleInput(const InputEvent& event) override;
-    /** @copydoc Screen::onBack */
-    BackAction onBack() override;
 };
 
 /** @brief Browses indexed Amiibo categories and opens a FiguresScreen for the selected category. */

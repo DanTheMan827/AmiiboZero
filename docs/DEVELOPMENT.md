@@ -2,19 +2,19 @@
 
 ## Build language and ownership
 
-The FAP uses C++ for all first-party application code and keeps the vendored lwJSON stream parser as C. App-owned C++ lives in `src/`; the minimal lwJSON stream parser in `third_party/lwjson/` is MIT-licensed third-party code. Current Flipper firmware builds C++ as C++20 with RTTI and exceptions disabled, so application code must not depend on either feature.
+The procedural application/runtime modules in `src/` are C. The screen stack and UI ownership code in `src/ui/` remain C++ because they use classes, virtual screen behavior, constructors/destructors, and C++ ownership patterns. `src/ui/ui_bridge.cpp` is the narrow C-linkage boundary used by the C entrypoint to create, run, and destroy a `UiManager` session. The vendored lwJSON stream parser remains C. Current Flipper firmware builds the UI sources as C++20 with RTTI and exceptions disabled, so UI code must not depend on either feature.
 
 The application manifest uses explicit source masks:
 
 ```python
-sources=["src/*.cpp", "third_party/lwjson/*.c"]
+sources=["src/*.c", "src/ui/*.cpp", "third_party/lwjson/*.c"]
 ```
 
-Do not replace this with a broad recursive pattern plus a second lwJSON pattern: uFBT can otherwise add the same lwJSON object twice and produce multiple-definition linker errors.
+Do not replace this with a broad recursive pattern plus a second lwJSON pattern: uFBT can otherwise add the same lwJSON object twice and produce multiple-definition linker errors. Public backend headers use `extern "C"` guards so the C++ UI links to unmangled C backend symbols.
 
 ## JSON and unified index architecture
 
-Raw JSON is always authoritative. `amiibo_db.cpp` feeds Flipper Storage bytes directly to `lwjson_stream_parser_t`; it never builds a DOM and never loads a complete database into memory.
+Raw JSON is always authoritative. `amiibo_db.c` feeds Flipper Storage bytes directly to `lwjson_stream_parser_t`; it never builds a DOM and never loads a complete database into memory.
 
 The default runtime path is index-backed:
 
@@ -140,7 +140,7 @@ The custom UI is object-oriented and stack-managed:
 
 ## Documentation rules
 
-Every app-owned `.cpp` and `.h` file must have `@file`. Document:
+Every app-owned `.c`, `.cpp`, and `.h` file must have `@file`. Document:
 
 - every function, including static helpers and callbacks;
 - every struct/enum/important alias;

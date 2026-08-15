@@ -7,6 +7,10 @@
 
 #include "amiibo_zero.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /**
  * @brief Return a display label for an Amiibo type code.
  * @param type Type or event code to interpret.
@@ -98,3 +102,7 @@ bool az_nfc_save_device(NfcDevice* device, const char* path);
  * @return true on success; false if the operation cannot be completed.
  */
 bool az_nfc_load_device(NfcDevice* device, const char* path);
+
+#ifdef __cplusplus
+}
+#endif

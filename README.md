@@ -1,6 +1,6 @@
 # Amiibo Zero for Flipper Zero
 
-Amiibo Zero is a Flipper Zero FAP for browsing Amiibo metadata, generating Amiibo data from an 8-byte figure ID plus a user-supplied `key_retail.bin`, emulating it, saving native `.nfc` files, showing game compatibility, and preserving game-side writes.
+Amiibo Zero is a C Flipper Zero FAP for browsing Amiibo metadata, generating Amiibo data from an 8-byte figure ID plus a user-supplied `key_retail.bin`, emulating it, saving native `.nfc` files, showing game compatibility, and preserving game-side writes.
 
 ## Highlights
 
@@ -186,12 +186,13 @@ The manifest intentionally uses explicit source masks so vendored `lwjson_stream
 
 ```text
 application.fam
-src/amiibo_zero.cpp        app lifetime and service ownership
+src/amiibo_zero.c        app lifetime and service ownership
 src/amiibo_zero.h          shared runtime models and application entry declaration
-src/amiibo_crypto.cpp/.h   generation, authentication, decrypt/re-key/encrypt
-src/amiibo_db.cpp/.h       lwJSON scans and unified JSON seek index
-src/amiibo_nfc.cpp/.h      NTAG215 plus stock-derived NTAG I2C Plus 2K emulation
-src/amiibo_storage.cpp/.h  saved library, lock-on payloads, rename/delete, file naming
+src/amiibo_crypto.c/.h   generation, authentication, decrypt/re-key/encrypt
+src/amiibo_db.c/.h       lwJSON scans and unified JSON seek index
+src/amiibo_nfc.c/.h      NTAG215 plus stock-derived NTAG I2C Plus 2K emulation
+src/amiibo_storage.c/.h  saved library, lock-on payloads, rename/delete, file naming
+src/ui/ui_bridge.cpp/.h       C linkage bridge for one C++ UI-manager session
 src/ui/ui_screen.cpp/.h       virtual Screen base class and Back/navigation contract
 src/ui/ui_manager.cpp/.h      screen-stack owner, dispatcher bridge, modal inputs, UI actions
 src/ui/ui_controls.cpp/.h     reusable drawing controls
@@ -205,7 +206,7 @@ THIRD_PARTY_NOTICES.md
 
 ## Documentation
 
-Every app-owned C++ source/header begins with an `@file` block. Functions, callbacks, structs, enums, public APIs, and significant fields/constants are Doxygen documented, including static implementation helpers. `Doxyfile` extracts static symbols and treats documentation warnings as errors.
+Every app-owned source/header begins with an `@file` block. Functions, callbacks, structs, enums, public APIs, and significant fields/constants are Doxygen documented, including static implementation helpers. `Doxyfile` extracts static symbols and treats documentation warnings as errors.
 
 ## References
 

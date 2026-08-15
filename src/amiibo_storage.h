@@ -7,11 +7,29 @@
 
 #include "amiibo_zero.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /**
  * @brief Create the application data directories required for persistent storage.
  * @param storage Storage service used for file operations.
  */
 void az_storage_init(Storage* storage);
+
+/**
+ * @brief Refresh presence information for the external application data files.
+ * @param storage Storage service used for file operations.
+ * @param out Destination status structure.
+ */
+void az_storage_check_data_files(Storage* storage, AzDataFiles* out);
+
+/**
+ * @brief Return whether every required external data file is present.
+ * @param files Data-file presence state to inspect.
+ * @return true when key_retail.bin and amiibo.json are both present.
+ */
+bool az_storage_required_data_present(const AzDataFiles* files);
 
 /**
  * @brief Enumerate saved Amiibo NFC files into a sorted catalog.
@@ -99,3 +117,7 @@ bool az_saved_rename(
  * @return true on success; false if the operation cannot be completed.
  */
 bool az_saved_delete(Storage* storage, const char* filename);
+
+#ifdef __cplusplus
+}
+#endif

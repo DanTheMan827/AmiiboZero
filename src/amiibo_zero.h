@@ -12,6 +12,7 @@
 #include <nfc/nfc.h>
 #include <nfc/nfc_device.h>
 #include <nfc/nfc_listener.h>
+#include <stdbool.h>
 #include <string.h>
 
 /** @brief Stable application identifier used by the Flipper environment. */
@@ -201,7 +202,20 @@ typedef enum {
  */
 typedef void (*AzDbProgressCallback)(void* context, AzDbProgressStage stage, uint8_t percent);
 
+#ifdef __cplusplus
 class UiManager;
+#else
+typedef struct UiManager UiManager;
+#endif
+
+/** @brief Presence state for external data files used by the application. */
+typedef struct AzDataFiles {
+    bool key_retail; /**< Whether key_retail.bin exists in the application data directory. */
+    bool amiibo_json; /**< Whether amiibo.json exists in the application data directory. */
+    bool games_json; /**< Whether optional games_info.json exists in the application data directory. */
+} AzDataFiles;
+
+typedef struct AmiiboZeroApp AmiiboZeroApp;
 
 /** @brief Complete non-UI runtime state for the Amiibo Zero application. */
 struct AmiiboZeroApp {
@@ -220,6 +234,7 @@ struct AmiiboZeroApp {
     char current_lockon_filename[96]; /**< Filename of the current Lock-On payload. */
 
     AzKeys keys; /**< Loaded retail key material. */
+    AzDataFiles data_files; /**< Presence state for required and optional external data files. */
     bool index_ready; /**< Whether the database index is ready for queries. */
     uint32_t index_count; /**< Number of figures reported by the current index. */
 
@@ -250,4 +265,12 @@ struct AmiiboZeroApp {
  * @param p Optional launch context supplied by the Flipper application loader.
  * @return Application exit status.
  */
-extern "C" int32_t amiibo_zero_app(void* p);
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+int32_t amiibo_zero_app(void* p);
+
+#ifdef __cplusplus
+}
+#endif
