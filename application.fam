@@ -7,9 +7,9 @@ App(
     stack_size=6 * 1024,
     fap_version="0.1.0",
     fap_category="NFC",
-    fap_description="Amiibo manager using on-device database, category browsing, and persistent write-back.",
+    fap_description="Amiibo browser, generator, and emulator.",
     fap_author="DanTheMan827",
     fap_icon="icon.png",
-    sources=["src/*.c", "src/*.cpp", "third_party/lwjson/*.c"],
+    sources=["src/*.c", "third_party/lwjson/*.c"],
     fap_libs=["mbedtls"],
 )

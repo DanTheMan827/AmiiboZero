@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - "**"
+    tags:
+      - "v*.*.*"
   pull_request:
   workflow_dispatch:
 
@@ -13,6 +15,9 @@ permissions:
 concurrency:
   group: fap-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
+
+env:
+  FALLBACK_VERSION: "0.1.0"
 
 jobs:
   build:
@@ -28,6 +33,109 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+        with:
+          # Version resolution needs the complete reachable tag history.
+          fetch-depth: 0
+
+      - name: Resolve build version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Capture the source revision before generated version edits are made.
+          short_sha="$(git rev-parse --short=7 HEAD)"
+          semver_regex='^v[0-9]+\.[0-9]+\.[0-9]+$'
+
+          event_tag=""
+          if [[ "${GITHUB_REF_TYPE:-}" == "tag" ]]; then
+            event_tag="${GITHUB_REF_NAME}"
+            if [[ ! "${event_tag}" =~ ${semver_regex} ]]; then
+              echo "::error::Release tags must use the form vX.Y.Z (received '${event_tag}')."
+              exit 1
+            fi
+          fi
+
+          # A commit that already has a semantic-version tag is a clean release
+          # version even when this run was triggered through a branch or manually.
+          exact_tag="${event_tag}"
+          if [[ -z "${exact_tag}" ]]; then
+            exact_tag="$({
+              git tag --points-at HEAD \
+                | grep -E "${semver_regex}" \
+                | sort -V \
+                | tail -n 1
+            } || true)"
+          fi
+
+          if [[ -n "${exact_tag}" ]]; then
+            base_version="${exact_tag#v}"
+            display_version="${base_version}"
+          else
+            # Use the highest reachable semantic-version tag as the development
+            # baseline. Repositories with no version tag start at 0.1.0.
+            previous_tag="$({
+              git tag --merged HEAD \
+                | grep -E "${semver_regex}" \
+                | sort -V \
+                | tail -n 1
+            } || true)"
+
+            if [[ -n "${previous_tag}" ]]; then
+              base_version="${previous_tag#v}"
+            else
+              base_version="${FALLBACK_VERSION}"
+            fi
+
+            display_version="${base_version}-${short_sha}"
+          fi
+
+          echo "base=${base_version}" >> "${GITHUB_OUTPUT}"
+          echo "display=${display_version}" >> "${GITHUB_OUTPUT}"
+          echo "short_sha=${short_sha}" >> "${GITHUB_OUTPUT}"
+          echo "exact_tag=${exact_tag}" >> "${GITHUB_OUTPUT}"
+
+          echo "Base FAP version: ${base_version}"
+          echo "Displayed app version: ${display_version}"
+
+      - name: Inject build version
+        shell: bash
+        env:
+          BASE_VERSION: ${{ steps.version.outputs.base }}
+          DISPLAY_VERSION: ${{ steps.version.outputs.display }}
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          replacements = (
+              (
+                  Path("application.fam"),
+                  r'(fap_version\s*=\s*")[^"]*(")',
+                  rf'\g<1>{os.environ["BASE_VERSION"]}\g<2>',
+                  "fap_version",
+              ),
+              (
+                  Path("src/amiibo_zero.h"),
+                  r'(#define\s+AZ_APP_VERSION\s+")[^"]*(")',
+                  rf'\g<1>{os.environ["DISPLAY_VERSION"]}\g<2>',
+                  "AZ_APP_VERSION",
+              ),
+          )
+
+          for path, pattern, replacement, field in replacements:
+              source = path.read_text(encoding="utf-8")
+              updated, count = re.subn(pattern, replacement, source, count=1)
+              if count != 1:
+                  raise SystemExit(f"Could not update {field} in {path}")
+              path.write_text(updated, encoding="utf-8")
+          PY
+
+          grep -n 'fap_version' application.fam
+          grep -n 'AZ_APP_VERSION' src/amiibo_zero.h
 
       - name: Build Amiibo Zero with uFBT
         id: build-app
@@ -40,7 +148,59 @@ jobs:
       - name: Upload FAP artifact
         uses: actions/upload-artifact@v7
         with:
-          name: amiibo-zero-${{ matrix.sdk-channel }}-${{ steps.build-app.outputs.suffix }}
+          name: amiibo-zero-${{ matrix.sdk-channel }}
           path: ${{ steps.build-app.outputs.fap-artifacts }}
           if-no-files-found: error
           retention-days: 14
+
+  release:
+    name: Publish GitHub release
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Validate release tag
+        id: release-version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ ! "${GITHUB_REF_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Release tags must use the form vX.Y.Z."
+            exit 1
+          fi
+
+          echo "version=${GITHUB_REF_NAME#v}" >> "${GITHUB_OUTPUT}"
+
+      - name: Download release-channel FAP
+        uses: actions/download-artifact@v8
+        with:
+          name: amiibo-zero-release
+          path: release-dist
+
+      - name: Publish release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ steps.release-version.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          mapfile -d '' fap_files < <(find release-dist -type f -name '*.fap' -print0)
+          if (( ${#fap_files[@]} == 0 )); then
+            echo "::error::No .fap file was found in the release build artifact."
+            exit 1
+          fi
+
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" "${fap_files[@]}" --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" \
+              "${fap_files[@]}" \
+              --verify-tag \
+              --generate-notes \
+              --title "Amiibo Zero ${RELEASE_VERSION}"
+          fi
