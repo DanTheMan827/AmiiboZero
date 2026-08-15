@@ -2,19 +2,19 @@
 
 ## Build language and ownership
 
-The FAP is C (`gnu17`) and uses the official Flipper external-app APIs. App-owned code lives in `src/`; the minimal lwJSON stream parser in `third_party/lwjson/` is MIT-licensed third-party code.
+The FAP uses C++ for all first-party application code and keeps the vendored lwJSON stream parser as C. App-owned C++ lives in `src/`; the minimal lwJSON stream parser in `third_party/lwjson/` is MIT-licensed third-party code. Current Flipper firmware builds C++ as C++20 with RTTI and exceptions disabled, so application code must not depend on either feature.
 
 The application manifest uses explicit source masks:
 
 ```python
-sources=["src/*.c", "third_party/lwjson/*.c"]
+sources=["src/*.cpp", "third_party/lwjson/*.c"]
 ```
 
 Do not replace this with a broad recursive pattern plus a second lwJSON pattern: uFBT can otherwise add the same lwJSON object twice and produce multiple-definition linker errors.
 
 ## JSON and unified index architecture
 
-Raw JSON is always authoritative. `amiibo_db.c` feeds Flipper Storage bytes directly to `lwjson_stream_parser_t`; it never builds a DOM and never loads a complete database into memory.
+Raw JSON is always authoritative. `amiibo_db.cpp` feeds Flipper Storage bytes directly to `lwjson_stream_parser_t`; it never builds a DOM and never loads a complete database into memory.
 
 The default runtime path is index-backed:
 
@@ -111,14 +111,21 @@ Do not assume all future Amiibo revisions use exactly the same layout merely bec
 
 Do not display unauthenticated encrypted bytes as decoded metadata.
 
-## UI state rules
+## UI architecture and state rules
 
-- `screen_selection[AzScreenCount]` retains the last selected row for each custom screen.
-- Before navigating away, store the current selection.
-- When returning, restore the target screen's remembered selection unless that collection shrank; clamp saved-file selection after rescans/deletes.
+The custom UI is object-oriented and stack-managed:
+
+- `Screen` is the virtual base class for every custom screen. Each concrete screen owns its draw code, input handler, selection/scroll state, and any screen-scoped resources.
+- `UiManager` owns a fixed-capacity stack of `Screen` objects. Only the top screen is drawn and receives custom-view input.
+- Normal forward navigation pushes a new screen. Normal Back handling calls the top screen's virtual `onBack()` hook, then applies the returned `BackAction` only after the callback returns.
+- The base `Screen::onBack()` returns `BackAction::Pop`. A screen can return `BackAction::Cancel` to veto Back or `BackAction::Exit` to leave the app. `EmulationScreen` uses the hook to stop/synchronize NFC before allowing its pop; `WorkingScreen` cancels Back while database preparation is active.
+- A screen that needs to remove or replace itself from inside an input handler must request deferred navigation through `UiManager::schedulePop()` or `schedulePopAndPush()`. This avoids destroying a C++ object while one of its member functions is still on the call stack.
+- List selection and scroll position live in the screen object rather than global arrays. Pushing a child therefore preserves the parent's exact UI state automatically, and popping the child reveals that same parent instance.
+- Screen-owned catalogs use RAII: Saved, Lock-On, and compatibility arrays are allocated by their screen and released by its destructor.
+- `UiControls` contains reusable drawing primitives for headers, footers, list rows, scrollbars, fitted/marquee text, and wrapped detail text. Keep common rendering behavior there rather than copying it into individual screens.
+- Native Flipper `TextInput` and `ByteInput` remain auxiliary dispatcher views. Returning from them resumes the existing top custom screen instead of constructing replacement navigation state.
+- Potentially slow index validation/rebuild runs in the `AmiiboIndex` worker thread while `WorkingScreen` displays stage/percentage progress sampled from lock-free scalar fields.
 - Figure detail uses the character/figure name as the header; type belongs in body text.
-- Potentially slow index validation/rebuild runs in `AmiiboIndex` worker thread while `AzScreenWorking` animates and displays stage/percentage progress sampled from lock-free scalar fields.
-- Module views (TextInput/ByteInput) return to the existing custom-screen state without resetting its selection.
 
 ## Memory and API rules
 
@@ -133,7 +140,7 @@ Do not display unauthenticated encrypted bytes as decoded metadata.
 
 ## Documentation rules
 
-Every app-owned `.c` and `.h` file must have `@file`. Document:
+Every app-owned `.cpp` and `.h` file must have `@file`. Document:
 
 - every function, including static helpers and callbacks;
 - every struct/enum/important alias;
@@ -149,7 +156,7 @@ The vendored lwJSON subset must retain upstream copyright/license notices and it
 
 Before packaging:
 
-- strict `gnu17` compile with `-Wall -Wextra -Werror`;
+- strict C++20 compile with the Flipper-style no-RTTI/no-exceptions flags and warnings treated as errors;
 - check stack-usage reports for unexpectedly large frames;
 - inspect unresolved imports for forbidden symbols;
 - run the unified-index synthetic test, including size-change invalidation and sampled-window same-size mutation invalidation;

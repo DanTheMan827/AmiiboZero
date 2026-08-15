@@ -1,15 +1,15 @@
 App(
     appid="amiibo_zero",
-    name="Amiibo Zero",
+    name="Amiibo",
     apptype=FlipperAppType.EXTERNAL,
     entry_point="amiibo_zero_app",
     targets=["f7"],
     stack_size=6 * 1024,
     fap_version="0.1.0",
     fap_category="NFC",
-    fap_description="Amiibo browser, generator, and emulator.",
+    fap_description="Amiibo browser, generator, and emulator with persistent figure storage.",
     fap_author="DanTheMan827",
     fap_icon="icon.png",
-    sources=["src/*.c", "third_party/lwjson/*.c"],
+    sources=["src/*.cpp", "third_party/lwjson/*.c"],
     fap_libs=["mbedtls"],
 )
