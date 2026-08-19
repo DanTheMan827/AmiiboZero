@@ -25,10 +25,7 @@ void AzAboutScreen::draw(Canvas* canvas, const AzViewModel* model) const {
 
 bool AzAboutScreen::input(AmiiboZeroApp* app, const InputEvent* event) const {
 
-    const bool short_press = event->type == InputTypeShort;
-    if(short_press && event->key == InputKeyBack) {
-        az_ui_navigate(app, AzScreenHome, false);
-    } else if(event->key == InputKeyUp) {
+    if(event->key == InputKeyUp) {
         if(app->detail_scroll > 0U) app->detail_scroll--;
     } else if(event->key == InputKeyDown) {
         if(app->detail_scroll < UINT16_MAX) app->detail_scroll++;

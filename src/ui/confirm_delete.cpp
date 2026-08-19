@@ -31,23 +31,23 @@ void AzConfirmDeleteScreen::draw(Canvas* canvas, const AzViewModel* model) const
 bool AzConfirmDeleteScreen::input(AmiiboZeroApp* app, const InputEvent* event) const {
 
     const bool short_press = event->type == InputTypeShort;
-    if(short_press && event->key == InputKeyBack) {
-        az_ui_navigate(app, AzScreenFigure, false);
-    } else if(short_press && event->key == InputKeyOk) {
+    if(short_press && event->key == InputKeyOk) {
         uint16_t saved_selection = app->screen_selection[AzScreenSaved];
         if(az_saved_delete(app->storage, app->current_saved_filename)) {
-            if(!az_ui_refresh_saved_catalog(app)) {
-                az_ui_toast(app, "Deleted; catalog refresh failed");
-                az_ui_navigate(app, AzScreenHome, false);
-                return true;
-            }
-            if(saved_selection >= app->saved_count && app->saved_count) {
+            const bool catalog_ok = az_ui_refresh_saved_catalog(app);
+            if(catalog_ok && saved_selection >= app->saved_count && app->saved_count) {
                 saved_selection = (uint16_t)(app->saved_count - 1U);
             }
             app->screen_selection[AzScreenSaved] = saved_selection;
-            app->selection = saved_selection;
-            az_ui_show(app, AzScreenSaved);
-            az_ui_toast(app, "Figure deleted");
+
+            /* Remove confirmation and figure details; the stack restores their actual caller. */
+            az_ui_pop(app);
+            az_ui_pop(app);
+            if(app->screen == AzScreenSaved && catalog_ok) {
+                app->selection = saved_selection;
+                az_ui_refresh(app);
+            }
+            az_ui_toast(app, catalog_ok ? "Figure deleted" : "Deleted; catalog refresh failed");
         } else {
             az_ui_toast(app, "Delete failed");
         }

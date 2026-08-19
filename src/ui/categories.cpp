@@ -29,9 +29,7 @@ void AzCategoriesScreen::draw(Canvas* canvas, const AzViewModel* model) const {
 bool AzCategoriesScreen::input(AmiiboZeroApp* app, const InputEvent* event) const {
 
     const bool short_press = event->type == InputTypeShort;
-    if(short_press && event->key == InputKeyBack) {
-        az_ui_navigate(app, AzScreenHome, false);
-    } else if(event->key == InputKeyUp) {
+    if(event->key == InputKeyUp) {
         az_ui_move_selection(app, -1, app->list_count);
     } else if(event->key == InputKeyDown) {
         az_ui_move_selection(app, 1, app->list_count);
@@ -41,8 +39,7 @@ bool AzCategoriesScreen::input(AmiiboZeroApp* app, const InputEvent* event) cons
         if(az_db_get_category(app->storage, app->selection, &app->current_category)) {
             app->screen_selection[AzScreenCategories] = app->selection;
             app->screen_selection[AzScreenFigures] = 0U;
-            app->selection = 0U;
-            az_ui_show(app, AzScreenFigures);
+            az_ui_navigate(app, AzScreenFigures, true);
         }
     }
     return true;

@@ -100,19 +100,93 @@ static void az_draw_callback(Canvas* canvas, void* context) {
 #endif
 }
 
+/** Save mutable cursor/scroll state into the currently visible stack entry. */
+static void az_ui_stack_sync_top(AmiiboZeroApp* app) {
+    if(!app || app->ui_stack_depth == 0U) return;
+    AzUiStackEntry* entry = &app->ui_stack[app->ui_stack_depth - 1U];
+    entry->screen = app->screen;
+    entry->selection = app->selection;
+    entry->detail_scroll = app->detail_scroll;
+    if(app->screen < AzScreenCount) app->screen_selection[app->screen] = app->selection;
+}
+
+/** Restore and display the top stack entry without changing NFC hardware ownership. */
+static void az_ui_stack_activate_top(AmiiboZeroApp* app) {
+    if(!app || app->ui_stack_depth == 0U) return;
+    AzUiStackEntry* entry = &app->ui_stack[app->ui_stack_depth - 1U];
+    app->screen = entry->screen;
+    app->selection = entry->selection;
+    app->detail_scroll = entry->detail_scroll;
+    app->animation = 0U;
+
+    az_ui_screen_for(app->screen).onResume(app);
+    entry->selection = app->selection;
+    entry->detail_scroll = app->detail_scroll;
+    if(app->screen < AzScreenCount) app->screen_selection[app->screen] = app->selection;
+
+    az_ui_refresh(app);
+    view_dispatcher_switch_to_view(app->dispatcher, AZ_VIEW_MAIN);
+}
+
 /**
- * @brief Remember the current screen selection and switch to another screen.
+ * @brief Push a target screen onto the framework navigation stack.
  * @param app Application state.
  * @param screen Target screen.
  * @param reset_target Reset the target's remembered selection to zero before entering it.
  */
 void az_ui_navigate(AmiiboZeroApp* app, AzScreen screen, bool reset_target) {
     if(!app || screen >= AzScreenCount) return;
-    if(app->screen < AzScreenCount) app->screen_selection[app->screen] = app->selection;
-    if(reset_target) app->screen_selection[screen] = 0;
-    app->selection = app->screen_selection[screen];
-    app->detail_scroll = 0;
-    az_ui_show(app, screen);
+    if(app->ui_stack_depth >= AZ_UI_STACK_MAX) {
+        az_ui_toast(app, "Navigation stack full");
+        return;
+    }
+
+    az_ui_stack_sync_top(app);
+    if(reset_target) app->screen_selection[screen] = 0U;
+    AzUiStackEntry* entry = &app->ui_stack[app->ui_stack_depth++];
+    entry->screen = screen;
+    entry->selection = app->screen_selection[screen];
+    entry->detail_scroll = 0U;
+    az_ui_stack_activate_top(app);
+}
+
+/** Replace only the current stack entry, invoking its pop cleanup first. */
+void az_ui_replace(AmiiboZeroApp* app, AzScreen screen, bool reset_target) {
+    if(!app || screen >= AzScreenCount) return;
+    if(app->ui_stack_depth == 0U) {
+        az_ui_navigate(app, screen, reset_target);
+        return;
+    }
+
+    az_ui_stack_sync_top(app);
+    const AzScreen old_screen = app->ui_stack[app->ui_stack_depth - 1U].screen;
+    az_ui_screen_for(old_screen).onPopped(app);
+    if(reset_target) app->screen_selection[screen] = 0U;
+    AzUiStackEntry* entry = &app->ui_stack[app->ui_stack_depth - 1U];
+    entry->screen = screen;
+    entry->selection = app->screen_selection[screen];
+    entry->detail_scroll = 0U;
+    az_ui_stack_activate_top(app);
+}
+
+/**
+ * @brief Remove the current screen. Removing the final entry terminates the app loop.
+ * @return True when an entry was removed.
+ */
+bool az_ui_pop(AmiiboZeroApp* app) {
+    if(!app || app->ui_stack_depth == 0U) return false;
+
+    az_ui_stack_sync_top(app);
+    const AzScreen popped = app->ui_stack[app->ui_stack_depth - 1U].screen;
+    az_ui_screen_for(popped).onPopped(app);
+    app->ui_stack_depth--;
+    if(app->ui_stack_depth == 0U) {
+        view_dispatcher_stop(app->dispatcher);
+        return true;
+    }
+
+    az_ui_stack_activate_top(app);
+    return true;
 }
 
 /**
@@ -169,8 +243,7 @@ bool az_ui_open_lockon_selector(AmiiboZeroApp* app, AzLockOnAction action) {
     if(app->screen_selection[AzScreenLockOn] >= app->lockon_count && app->lockon_count) {
         app->screen_selection[AzScreenLockOn] = (uint16_t)(app->lockon_count - 1U);
     }
-    app->selection = app->screen_selection[AzScreenLockOn];
-    az_ui_show(app, AzScreenLockOn);
+    az_ui_navigate(app, AzScreenLockOn, false);
     return true;
 }
 
@@ -244,9 +317,7 @@ static bool az_begin_emulation(AmiiboZeroApp* app, bool persistent, bool fresh) 
     } else {
         app->emulation_path[0] = '\0';
     }
-    if(app->screen < AzScreenCount) app->screen_selection[app->screen] = app->selection;
-    app->selection = 0;
-    az_ui_show(app, AzScreenEmulate);
+    az_ui_navigate(app, AzScreenEmulate, true);
     return true;
 }
 
@@ -299,23 +370,23 @@ void az_ui_apply_selected_lockon(AmiiboZeroApp* app) {
     AzLockOnAction action = app->lockon_action;
     app->lockon_action = AzLockOnActionNone;
     az_ui_clear_lockon_catalog(app);
+    if(app->screen == AzScreenLockOn) az_ui_pop(app);
 
     if(action == AzLockOnActionGenerateTemporary) {
-        if(!az_begin_emulation(app, false, true)) az_ui_show(app, AzScreenFigure);
+        az_begin_emulation(app, false, true);
         return;
     }
     if(action == AzLockOnActionGeneratePersistent) {
-        if(!az_begin_emulation(app, true, true)) az_ui_show(app, AzScreenFigure);
+        az_begin_emulation(app, true, true);
         return;
     }
     if(action == AzLockOnActionEmulateSaved && app->current_is_saved) {
         bool ok = az_saved_lockon_save(
             app->storage, app->current_saved_filename, app->current_lockon_sram);
         if(ok) {
-            if(!az_begin_emulation(app, true, false)) az_ui_show(app, AzScreenFigure);
+            az_begin_emulation(app, true, false);
         } else {
             app->selection = app->screen_selection[AzScreenFigure];
-            az_ui_show(app, AzScreenFigure);
             az_ui_toast(app, "Could not attach lock-on");
         }
         return;
@@ -324,12 +395,9 @@ void az_ui_apply_selected_lockon(AmiiboZeroApp* app) {
         bool ok = az_saved_lockon_save(
             app->storage, app->current_saved_filename, app->current_lockon_sram);
         app->selection = app->screen_selection[AzScreenFigure];
-        az_ui_show(app, AzScreenFigure);
         az_ui_toast(app, ok ? "Lock-on changed" : "Lock-on change failed");
         return;
     }
-
-    az_ui_show(app, AzScreenFigure);
 }
 
 /**
@@ -374,7 +442,7 @@ void az_ui_emulation_randomize_uid(AmiiboZeroApp* app) {
     if(!restarted) {
         app->emulation_persistent = false;
         az_ui_toast(app, "NFC restart failed");
-        az_ui_navigate(app, AzScreenFigure, false);
+        az_ui_pop(app);
         return;
     }
     if(!randomized) az_ui_toast(app, "UID randomize failed");
@@ -408,9 +476,18 @@ static void az_search_done(void* context) {
     AmiiboZeroApp* app = static_cast<AmiiboZeroApp*>(context);
     az_str_copy(app->query, sizeof(app->query), app->text_buffer);
     app->screen_selection[AzScreenSearchResults] = 0;
-    app->selection = 0;
-    app->detail_scroll = 0;
-    az_ui_show(app, app->query[0] ? AzScreenSearchResults : AzScreenCategories);
+    if(app->screen == AzScreenSearchResults) {
+        if(app->query[0]) {
+            az_ui_replace(app, AzScreenSearchResults, true);
+        } else {
+            az_ui_pop(app);
+        }
+    } else if(app->query[0]) {
+        az_ui_navigate(app, AzScreenSearchResults, true);
+    } else {
+        az_ui_refresh(app);
+        view_dispatcher_switch_to_view(app->dispatcher, AZ_VIEW_MAIN);
+    }
 }
 
 /**
@@ -449,16 +526,16 @@ static void az_rename_done(void* context) {
            sizeof(renamed))) {
         az_str_copy(app->current_saved_filename, sizeof(app->current_saved_filename), renamed);
         if(!az_ui_refresh_saved_catalog(app)) {
-            az_ui_show(app, AzScreenFigure);
+            view_dispatcher_switch_to_view(app->dispatcher, AZ_VIEW_MAIN);
             az_ui_toast(app, "Renamed; catalog refresh failed");
             return;
         }
         app->screen_selection[AzScreenSaved] =
             az_ui_saved_selection_for_filename(app, renamed, app->screen_selection[AzScreenSaved]);
-        az_ui_show(app, AzScreenFigure);
+        view_dispatcher_switch_to_view(app->dispatcher, AZ_VIEW_MAIN);
         az_ui_toast(app, "Renamed");
     } else {
-        az_ui_show(app, AzScreenFigure);
+        view_dispatcher_switch_to_view(app->dispatcher, AZ_VIEW_MAIN);
         az_ui_toast(app, "Rename failed");
     }
 }
@@ -508,11 +585,8 @@ static void az_manual_id_done(void* context) {
     app->current_saved_filename[0] = '\0';
     app->current_lockon_valid = false;
     app->current_lockon_filename[0] = '\0';
-    app->return_screen = AzScreenAdvanced;
-    app->return_selection = app->screen_selection[AzScreenAdvanced];
     app->screen_selection[AzScreenFigure] = 0;
-    app->selection = 0;
-    az_ui_show(app, AzScreenFigure);
+    az_ui_navigate(app, AzScreenFigure, true);
 }
 
 /**
@@ -577,12 +651,8 @@ uint16_t az_ui_saved_selection_for_filename(
 /**
  * @brief Enter the shared physical-tag screen after starting one operation.
  */
-static void az_show_tag_operation(AmiiboZeroApp* app, AzScreen return_screen, uint16_t return_selection) {
-    app->tag_return_screen = return_screen;
-    app->tag_return_selection = return_selection;
-    app->selection = 0;
-    app->detail_scroll = 0;
-    az_ui_show(app, AzScreenTagOperation);
+static void az_show_tag_operation(AmiiboZeroApp* app) {
+    az_ui_navigate(app, AzScreenTagOperation, true);
 }
 
 /**
@@ -620,7 +690,7 @@ void az_ui_open_tag_write(AmiiboZeroApp* app) {
         az_ui_toast(app, "Could not start tag writer");
         return;
     }
-    az_show_tag_operation(app, AzScreenFigure, app->screen_selection[AzScreenFigure]);
+    az_show_tag_operation(app);
 }
 
 /** Begin Advanced > Read & save Amiibo. */
@@ -634,7 +704,7 @@ void az_ui_open_tag_read_save(AmiiboZeroApp* app) {
         az_ui_toast(app, "Could not start tag reader");
         return;
     }
-    az_show_tag_operation(app, AzScreenAdvanced, app->screen_selection[AzScreenAdvanced]);
+    az_show_tag_operation(app);
 }
 
 /** Begin Advanced > Clear tag user data. */
@@ -648,7 +718,7 @@ void az_ui_open_tag_clear(AmiiboZeroApp* app) {
         az_ui_toast(app, "Could not start tag reset");
         return;
     }
-    az_show_tag_operation(app, AzScreenAdvanced, app->screen_selection[AzScreenAdvanced]);
+    az_show_tag_operation(app);
 }
 
 /**
@@ -690,9 +760,7 @@ void az_ui_open_current_saved(AmiiboZeroApp* app) {
         app->current_lockon_filename[0] = '\0';
     }
     app->screen_selection[AzScreenFigure] = 0;
-    app->selection = 0;
-    app->detail_scroll = 0;
-    az_ui_show(app, AzScreenFigure);
+    az_ui_navigate(app, AzScreenFigure, true);
 }
 
 /**
@@ -726,9 +794,7 @@ void az_ui_open_games(AmiiboZeroApp* app) {
         az_ui_toast(app, "Could not read games DB");
     }
     app->screen_selection[AzScreenGames] = 0;
-    app->selection = 0;
-    app->detail_scroll = 0;
-    az_ui_show(app, AzScreenGames);
+    az_ui_navigate(app, AzScreenGames, true);
 }
 
 /**
@@ -767,11 +833,10 @@ static int32_t az_database_worker(void* context) {
 /**
  * @brief Start background database preparation and enter the animated working screen.
  */
-bool az_ui_start_database_prepare(AmiiboZeroApp* app, bool force, AzScreen return_screen) {
+bool az_ui_start_database_prepare(AmiiboZeroApp* app, bool force) {
     if(!app || app->db_thread) return false;
     if(app->screen < AzScreenCount) app->screen_selection[app->screen] = app->selection;
     app->db_thread_force = force;
-    app->db_thread_return_screen = return_screen;
     app->db_thread_done = false;
     app->db_thread_result = false;
     app->db_thread_count = 0;
@@ -779,9 +844,7 @@ bool az_ui_start_database_prepare(AmiiboZeroApp* app, bool force, AzScreen retur
     app->db_progress_stage = AzDbProgressChecking;
     app->db_thread = furi_thread_alloc_ex("AmiiboIndex", 6144, az_database_worker, app);
     if(!app->db_thread) return false;
-    app->selection = 0;
-    app->detail_scroll = 0;
-    az_ui_show(app, AzScreenWorking);
+    az_ui_navigate(app, AzScreenWorking, true);
     furi_thread_start(app->db_thread);
     return true;
 }
@@ -819,7 +882,7 @@ static void az_release_runtime_records_for_index_refresh(AmiiboZeroApp* app) {
 void az_ui_status_refresh(AmiiboZeroApp* app) {
     az_release_runtime_records_for_index_refresh(app);
     app->keys.valid = az_keys_load(app->storage, &app->keys);
-    if(!az_ui_start_database_prepare(app, true, AzScreenStatus)) {
+    if(!az_ui_start_database_prepare(app, true)) {
         az_ui_toast(app, "Refresh already running");
     }
 }
@@ -846,6 +909,16 @@ static bool az_main_input(InputEvent* event, void* context) {
     if(!app || !event) return false;
     if(event->type != InputTypeShort && event->type != InputTypeRepeat) return false;
 
+    if(event->type == InputTypeShort && event->key == InputKeyBack) {
+        const AzUiScreen& screen = az_ui_screen_for(app->screen);
+        if(screen.backRequested(app, event)) {
+            az_ui_pop(app);
+        } else {
+            az_ui_refresh(app);
+        }
+        return true;
+    }
+
     const bool consumed = az_ui_screen_for(app->screen).input(app, event);
     if(consumed) az_ui_refresh(app);
     return consumed;
@@ -865,10 +938,7 @@ static void az_tick_callback(void* context) {
         app->db_thread = NULL;
         app->index_ready = app->db_thread_result;
         app->index_count = app->index_ready ? app->db_thread_count : 0U;
-        AzScreen target = app->db_thread_return_screen;
-        app->selection = app->screen_selection[target];
-        app->detail_scroll = 0;
-        az_ui_show(app, target);
+        if(app->screen == AzScreenWorking) az_ui_pop(app);
         az_ui_toast(app, app->index_ready ? "Database ready" : "Database prepare failed");
         return;
     }
@@ -884,16 +954,6 @@ void az_ui_toast(AmiiboZeroApp* app, const char* text) {
     app->toast_ticks = 8;
     app->animation = 0;
     az_ui_refresh(app);
-}
-
-/**
- * @brief Switch application screen state and display the main view.
- */
-void az_ui_show(AmiiboZeroApp* app, AzScreen screen) {
-    app->screen = screen;
-    app->animation = 0;
-    az_ui_refresh(app);
-    view_dispatcher_switch_to_view(app->dispatcher, AZ_VIEW_MAIN);
 }
 
 /**
@@ -1005,10 +1065,13 @@ void az_ui_init(AmiiboZeroApp* app) {
 
     view_dispatcher_attach_to_gui(app->dispatcher, app->gui, ViewDispatcherTypeFullscreen);
     app->screen = AzScreenHome;
-    app->selection = 0;
-    app->detail_scroll = 0;
-    az_ui_refresh(app);
-    view_dispatcher_switch_to_view(app->dispatcher, AZ_VIEW_MAIN);
+    app->selection = 0U;
+    app->detail_scroll = 0U;
+    app->ui_stack_depth = 1U;
+    app->ui_stack[0].screen = AzScreenHome;
+    app->ui_stack[0].selection = 0U;
+    app->ui_stack[0].detail_scroll = 0U;
+    az_ui_stack_activate_top(app);
 }
 
 /**

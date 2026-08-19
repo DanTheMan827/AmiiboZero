@@ -139,16 +139,24 @@ Do not display unauthenticated encrypted bytes as decoded metadata.
 
 ## UI state rules
 
-- Each custom screen is a full C++ class derived from `AzUiScreen`; drawing and input handling live together in that screen's `src/ui/<screen>.cpp`. `src/amiibo_ui.cpp` only forwards callbacks to the active screen object and owns shared controller actions. Shared drawing helpers live in `src/ui/ui_common.cpp`.
+- Each custom screen is a full C++ class derived from `AzUiScreen`; drawing and non-navigation input handling live together in that screen's `src/ui/<screen>.cpp`. The base class also defines `backRequested()`, `onResume()`, and `onPopped()` lifecycle hooks so every screen follows the same framework contract. `src/amiibo_ui.cpp` owns the stack and shared controller actions. Shared drawing helpers live in `src/ui/ui_common.cpp`.
 - `application.fam` compiles `src/ui/*.cpp` as normal translation units; screen sources are not included into `amiibo_ui.cpp`.
 - `AZ_DEBUG_MEMORY_OVERLAY` is defined by default unless `AZ_DISABLE_MEMORY_OVERLAY` is defined. All overlay code is guarded with `#ifdef AZ_DEBUG_MEMORY_OVERLAY`; the counter is drawn last in the same custom-screen canvas callback and must never be implemented as a second fullscreen viewport.
 
-- `screen_selection[AzScreenCount]` retains the last selected row for each custom screen.
-- Before navigating away, store the current selection.
-- When returning, restore the target screen's remembered selection unless that collection shrank; clamp saved-file selection after rescans/deletes.
+- Custom screens are pushed onto the bounded `ui_stack`. Each stack entry owns its screen, selection, and detail-scroll state. Back is handled centrally: the active screen receives the actual request through `backRequested()` and may veto it; otherwise the framework pops the top entry.
+- Popping the final stack entry stops the `ViewDispatcher`, which is the normal application-exit path. Screens must not call `view_dispatcher_stop()` for ordinary Back handling.
+- `screen_selection[AzScreenCount]` remains a remembered default for a newly pushed instance. Returning through Back restores the exact state stored in that stack entry instead of reconstructing a destination from ad-hoc return-screen fields.
+- `onResume()` may repair state that was intentionally released while a screen was covered. Saved figures use this to reload/clamp the catalog after memory-heavy workflows release it.
+- `onPopped()` owns screen-specific transient cleanup. It must not free application-level services.
 - Figure detail uses the character/figure name as the header; type belongs in body text.
-- Potentially slow index validation/rebuild runs in `AmiiboIndex` worker thread while `AzScreenWorking` animates and displays stage/percentage progress sampled from lock-free scalar fields.
+- Potentially slow index validation/rebuild runs in `AmiiboIndex` worker thread while `AzScreenWorking` animates and displays stage/percentage progress sampled from lock-free scalar fields. `AzScreenWorking::backRequested()` rejects Back while that worker is active; completion pops the working screen and exposes its caller.
 - Module views (TextInput/ByteInput) return to the existing custom-screen state without resetting its selection.
+
+### NFC lifetime across UI navigation
+
+`Nfc` and the shared `NfcDevice` are application-owned resources allocated in `amiibo_zero_app()` and freed only during application shutdown. Generic screen push/pop/replace operations must never free, null, or otherwise disable those objects.
+
+Screen cleanup may release only the active NFC *session* that belongs to that screen. Popping Emulate stops/synchronizes its listener so the same app-owned NFC worker is immediately available for later emulation or polling. Popping a physical tag-operation screen cancels/frees only its poller and transient operation buffers. This separation prevents ordinary navigation from accidentally making NFC unavailable while still ensuring mutually exclusive listener/poller sessions are released before another NFC workflow begins.
 
 ## Memory and API rules
 

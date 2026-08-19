@@ -35,12 +35,14 @@ void AzEmulateScreen::draw(Canvas* canvas, const AzViewModel* model) const {
 bool AzEmulateScreen::input(AmiiboZeroApp* app, const InputEvent* event) const {
 
     const bool short_press = event->type == InputTypeShort;
-    if(short_press && event->key == InputKeyBack) {
-        az_emulation_stop(app);
-        az_ui_navigate(app, AzScreenFigure, false);
-    } else if(short_press && event->key == InputKeyOk) {
+    if(short_press && event->key == InputKeyOk) {
         az_ui_emulation_randomize_uid(app);
     }
     return true;
 
+}
+
+void AzEmulateScreen::onPopped(AmiiboZeroApp* app) const {
+    /* Stop only the active listener/session. The shared NFC object remains app-owned. */
+    az_emulation_stop(app);
 }

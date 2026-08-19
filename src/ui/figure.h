@@ -7,6 +7,7 @@ class AzFigureScreen final : public AzUiScreen {
 public:
     void draw(Canvas* canvas, const AzViewModel* model) const override;
     bool input(AmiiboZeroApp* app, const InputEvent* event) const override;
+    void onPopped(AmiiboZeroApp* app) const override;
 };
 
 extern const AzFigureScreen az_ui_figure_screen;

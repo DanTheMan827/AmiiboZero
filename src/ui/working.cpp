@@ -63,3 +63,8 @@ bool AzWorkingScreen::input(AmiiboZeroApp* app, const InputEvent* event) const {
     return true;
 
 }
+
+bool AzWorkingScreen::backRequested(AmiiboZeroApp* app, const InputEvent* event) const {
+    UNUSED(event);
+    return app && app->db_thread == NULL;
+}

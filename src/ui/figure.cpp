@@ -68,23 +68,6 @@ void AzFigureScreen::draw(Canvas* canvas, const AzViewModel* model) const {
 bool AzFigureScreen::input(AmiiboZeroApp* app, const InputEvent* event) const {
 
     const bool short_press = event->type == InputTypeShort;
-    if(short_press && event->key == InputKeyBack) {
-        if(app->current_is_saved) {
-            if(!az_ui_refresh_saved_catalog(app)) {
-                az_ui_toast(app, "Saved catalog unavailable");
-                az_ui_navigate(app, AzScreenHome, false);
-                return true;
-            }
-            app->screen_selection[AzScreenSaved] = az_ui_saved_selection_for_filename(
-                app, app->current_saved_filename, app->screen_selection[AzScreenSaved]);
-            az_ui_navigate(app, AzScreenSaved, false);
-        } else {
-            app->screen_selection[app->return_screen] = app->return_selection;
-            az_ui_navigate(app, app->return_screen, false);
-        }
-        return true;
-    }
-
     const bool v3 = az_figure_is_v3(app->current_figure.id);
     const uint8_t action_count = az_ui_figure_action_count(app->current_is_saved, v3);
     if(event->key == InputKeyUp) az_ui_move_selection(app, -1, action_count);
@@ -108,4 +91,16 @@ bool AzFigureScreen::input(AmiiboZeroApp* app, const InputEvent* event) const {
     }
     return true;
 
+}
+
+void AzFigureScreen::onPopped(AmiiboZeroApp* app) const {
+    if(!app || !app->current_is_saved || app->ui_stack_depth < 2U) return;
+    AzUiStackEntry* caller = &app->ui_stack[app->ui_stack_depth - 2U];
+    if(caller->screen != AzScreenSaved) return;
+
+    /* Saved may have been released while Figure was covered by a RAM-heavy workflow. */
+    if(!app->saved_entries && !az_ui_refresh_saved_catalog(app)) return;
+    caller->selection = az_ui_saved_selection_for_filename(
+        app, app->current_saved_filename, caller->selection);
+    app->screen_selection[AzScreenSaved] = caller->selection;
 }

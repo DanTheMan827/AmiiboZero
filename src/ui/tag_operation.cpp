@@ -85,21 +85,14 @@ void AzTagOperationScreen::draw(Canvas* canvas, const AzViewModel* model) const 
 bool AzTagOperationScreen::input(AmiiboZeroApp* app, const InputEvent* event) const {
 
     const bool short_press = event->type == InputTypeShort;
-    if(short_press && event->key == InputKeyBack) {
-        const AzScreen target = app->tag_return_screen;
-        const uint16_t target_selection = app->tag_return_selection;
-        az_tag_operation_cancel(app);
-        app->screen_selection[target] = target_selection;
-        app->selection = target_selection;
-        az_ui_show(app, target);
-    } else if(short_press && event->key == InputKeyOk && app->tag_stage == AzTagStageDone) {
-        const AzScreen target = app->tag_return_screen;
-        const uint16_t target_selection = app->tag_return_selection;
-        az_tag_operation_cancel(app);
-        app->screen_selection[target] = target_selection;
-        app->selection = target_selection;
-        az_ui_show(app, target);
+    if(short_press && event->key == InputKeyOk && app->tag_stage == AzTagStageDone) {
+        az_ui_pop(app);
     }
     return true;
 
+}
+
+void AzTagOperationScreen::onPopped(AmiiboZeroApp* app) const {
+    /* Release only the operation poller/transient buffers, not the app-owned NFC service. */
+    az_tag_operation_cancel(app);
 }

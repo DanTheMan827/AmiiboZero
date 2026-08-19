@@ -34,11 +34,7 @@ void AzLockOnScreen::draw(Canvas* canvas, const AzViewModel* model) const {
 bool AzLockOnScreen::input(AmiiboZeroApp* app, const InputEvent* event) const {
 
     const bool short_press = event->type == InputTypeShort;
-    if(short_press && event->key == InputKeyBack) {
-        az_ui_clear_lockon_catalog(app);
-        app->lockon_action = AzLockOnActionNone;
-        az_ui_navigate(app, AzScreenFigure, false);
-    } else if(event->key == InputKeyUp) {
+    if(event->key == InputKeyUp) {
         az_ui_move_selection(app, -1, app->lockon_count);
     } else if(event->key == InputKeyDown) {
         az_ui_move_selection(app, 1, app->lockon_count);
@@ -47,4 +43,9 @@ bool AzLockOnScreen::input(AmiiboZeroApp* app, const InputEvent* event) const {
     }
     return true;
 
+}
+
+void AzLockOnScreen::onPopped(AmiiboZeroApp* app) const {
+    az_ui_clear_lockon_catalog(app);
+    app->lockon_action = AzLockOnActionNone;
 }

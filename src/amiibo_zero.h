@@ -86,6 +86,8 @@
 #define AZ_MAX_LOCKONS 64
 /** Maximum Amiibo series/categories retained while building the index. */
 #define AZ_MAX_CATEGORIES 96
+/** Maximum number of simultaneously stacked UI screens. */
+#define AZ_UI_STACK_MAX 16
 
 /**
  * @brief Copy a C string into a bounded destination.
@@ -189,6 +191,13 @@ typedef enum {
     AzScreenWorking,            /**< Animated wait screen used during index generation. */
     AzScreenCount,              /**< Number of screen enum values used for selection memory. */
 } AzScreen;
+
+/** One resumable UI navigation entry. Screen-local cursor/scroll state lives with the entry. */
+typedef struct {
+    AzScreen screen;           /**< Screen object represented by this entry. */
+    uint16_t selection;        /**< Selection restored when the entry becomes visible again. */
+    uint16_t detail_scroll;    /**< Wrapped-detail scroll restored with the entry. */
+} AzUiStackEntry;
 
 /** Purpose currently assigned to the shared TextInput module. */
 typedef enum {
@@ -296,9 +305,9 @@ struct AmiiboZeroApp {
     FuriString* ui_scratch;                     /**< Reusable drawing string to avoid transient allocations. */
 
     AzScreen screen;                            /**< Current screen. */
+    AzUiStackEntry ui_stack[AZ_UI_STACK_MAX];   /**< Bounded screen navigation stack. */
+    uint8_t ui_stack_depth;                     /**< Number of live entries in ui_stack. */
     uint16_t screen_selection[AzScreenCount];   /**< Last selected row for each screen. */
-    AzScreen return_screen;                     /**< Screen restored after figure details. */
-    uint16_t return_selection;                  /**< Selection restored with return_screen. */
     uint16_t selection;                         /**< Current list/action selection. */
     uint16_t list_count;                        /**< Total rows in the active list. */
     uint16_t detail_scroll;                     /**< Vertical wrapped-text scroll position. */
@@ -334,7 +343,6 @@ struct AmiiboZeroApp {
     bool db_thread_result;                      /**< Index result produced by the worker. */
     uint32_t db_thread_count;                   /**< Figure count produced by the worker. */
     bool db_thread_force;                       /**< Force rebuild requested for the active worker. */
-    AzScreen db_thread_return_screen;           /**< Screen shown after the worker completes. */
     volatile uint8_t db_progress;               /**< Overall worker progress in percent. */
     volatile AzDbProgressStage db_progress_stage; /**< Worker stage copied into the GUI snapshot. */
 
@@ -346,12 +354,10 @@ struct AmiiboZeroApp {
     volatile uint8_t tag_progress;               /**< Page-write progress in percent. */
     uint8_t* tag_work_dump;                      /**< 532-byte encrypted source/prepared dump while active. */
     uint8_t tag_target_uid[9];                   /**< Raw nine-byte UID captured from the physical NTAG215. */
-    AzScreen tag_return_screen;                  /**< Screen restored after tag operation. */
-    uint16_t tag_return_selection;               /**< Selection restored with tag_return_screen. */
     char tag_saved_filename[96];                 /**< Basename created by Read & save. */
 
-    Nfc* nfc;                                   /**< NFC worker owned by the app. */
-    NfcDevice* nfc_device;                      /**< Mutable native NFC device data. */
+    Nfc* nfc;                                   /**< App-lifetime NFC worker; screen navigation never frees it. */
+    NfcDevice* nfc_device;                      /**< App-lifetime mutable NFC data; retained across screens. */
     NfcListener* listener;                      /**< Active emulation listener or NULL. */
     BitBuffer* v3_tx_buffer;                    /**< Reusable standard/short response buffer for v3 emulation. */
     bool v3_i2c_listener;                       /**< True when the stock-derived I2C Plus listener is active. */
@@ -711,20 +717,12 @@ void az_ui_deinit(AmiiboZeroApp* app);
 void az_ui_refresh(AmiiboZeroApp* app);
 
 /**
- * @brief Change the active screen and switch to the custom main view.
- * @param app Application instance.
- * @param screen Screen to activate.
- */
-void az_ui_show(AmiiboZeroApp* app, AzScreen screen);
-
-/**
  * @brief Start background index validation/rebuild and show the animated wait screen.
  * @param app Application instance.
  * @param force Force rebuild even if source size/sample identities match.
- * @param return_screen Screen shown when the worker completes.
  * @return True when a worker was started.
  */
-bool az_ui_start_database_prepare(AmiiboZeroApp* app, bool force, AzScreen return_screen);
+bool az_ui_start_database_prepare(AmiiboZeroApp* app, bool force);
 
 /**
  * @brief Display a short-lived header toast and request redraw.

@@ -34,10 +34,7 @@ void AzSavedScreen::draw(Canvas* canvas, const AzViewModel* model) const {
 bool AzSavedScreen::input(AmiiboZeroApp* app, const InputEvent* event) const {
 
     const bool short_press = event->type == InputTypeShort;
-    if(short_press && event->key == InputKeyBack) {
-        az_ui_clear_saved_catalog(app);
-        az_ui_navigate(app, AzScreenHome, false);
-    } else if(event->key == InputKeyUp) {
+    if(event->key == InputKeyUp) {
         az_ui_move_selection(app, -1, app->saved_count);
     } else if(event->key == InputKeyDown) {
         az_ui_move_selection(app, 1, app->saved_count);
@@ -46,4 +43,20 @@ bool AzSavedScreen::input(AmiiboZeroApp* app, const InputEvent* event) const {
     }
     return true;
 
+}
+
+void AzSavedScreen::onResume(AmiiboZeroApp* app) const {
+    if(!app->saved_entries && !az_ui_refresh_saved_catalog(app)) {
+        az_ui_toast(app, "Saved catalog unavailable");
+        return;
+    }
+    if(app->saved_count == 0U) {
+        app->selection = 0U;
+    } else if(app->selection >= app->saved_count) {
+        app->selection = (uint16_t)(app->saved_count - 1U);
+    }
+}
+
+void AzSavedScreen::onPopped(AmiiboZeroApp* app) const {
+    az_ui_clear_saved_catalog(app);
 }

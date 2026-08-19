@@ -45,11 +45,7 @@ void AzGamesScreen::draw(Canvas* canvas, const AzViewModel* model) const {
 
 bool AzGamesScreen::input(AmiiboZeroApp* app, const InputEvent* event) const {
 
-    const bool short_press = event->type == InputTypeShort;
-    if(short_press && event->key == InputKeyBack) {
-        az_ui_clear_games(app);
-        az_ui_navigate(app, AzScreenFigure, false);
-    } else if(event->key == InputKeyUp) {
+    if(event->key == InputKeyUp) {
         if(app->detail_scroll > 0U) app->detail_scroll--;
     } else if(event->key == InputKeyDown) {
         if(app->detail_scroll < UINT16_MAX) app->detail_scroll++;
@@ -64,4 +60,8 @@ bool AzGamesScreen::input(AmiiboZeroApp* app, const InputEvent* event) const {
     }
     return true;
 
+}
+
+void AzGamesScreen::onPopped(AmiiboZeroApp* app) const {
+    az_ui_clear_games(app);
 }

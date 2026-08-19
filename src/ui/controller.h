@@ -3,7 +3,12 @@
 
 #include "../amiibo_zero.h"
 
+/** Push a custom screen onto the UI stack. */
 void az_ui_navigate(AmiiboZeroApp* app, AzScreen screen, bool reset_target);
+/** Replace the current stack entry without disturbing entries below it. */
+void az_ui_replace(AmiiboZeroApp* app, AzScreen screen, bool reset_target);
+/** Pop the current stack entry; stopping the app when the stack becomes empty. */
+bool az_ui_pop(AmiiboZeroApp* app);
 bool az_ui_refresh_saved_catalog(AmiiboZeroApp* app);
 void az_ui_clear_saved_catalog(AmiiboZeroApp* app);
 bool az_ui_refresh_lockon_catalog(AmiiboZeroApp* app);

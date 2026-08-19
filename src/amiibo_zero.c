@@ -26,7 +26,7 @@ int32_t amiibo_zero_app(void* p) {
     app->nfc_device = nfc_device_alloc();
 
     az_ui_init(app);
-    if(!az_ui_start_database_prepare(app, false, AzScreenHome)) {
+    if(!az_ui_start_database_prepare(app, false)) {
         az_ui_toast(app, "Could not start DB check");
     }
     view_dispatcher_run(app->dispatcher);

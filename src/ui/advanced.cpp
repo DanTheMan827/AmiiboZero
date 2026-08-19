@@ -22,9 +22,7 @@ void AzAdvancedScreen::draw(Canvas* canvas, const AzViewModel* model) const {
 bool AzAdvancedScreen::input(AmiiboZeroApp* app, const InputEvent* event) const {
 
     const bool short_press = event->type == InputTypeShort;
-    if(short_press && event->key == InputKeyBack) {
-        az_ui_navigate(app, AzScreenHome, false);
-    } else if(event->key == InputKeyUp) {
+    if(event->key == InputKeyUp) {
         az_ui_move_selection(app, -1, 3U);
     } else if(event->key == InputKeyDown) {
         az_ui_move_selection(app, 1, 3U);

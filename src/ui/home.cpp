@@ -26,10 +26,6 @@ void AzHomeScreen::draw(Canvas* canvas, const AzViewModel* model) const {
 bool AzHomeScreen::input(AmiiboZeroApp* app, const InputEvent* event) const {
 
     const bool short_press = event->type == InputTypeShort;
-    if(short_press && event->key == InputKeyBack) {
-        view_dispatcher_stop(app->dispatcher);
-        return true;
-    }
     if(event->key == InputKeyUp) az_ui_move_selection(app, -1, 5U);
     else if(event->key == InputKeyDown) az_ui_move_selection(app, 1, 5U);
     else if(short_press && event->key == InputKeyOk) {
