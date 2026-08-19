@@ -1,31 +1,32 @@
 /**
  * @file amiibo_crypto.c
- * @brief Amiibo dump cryptography and UID generation.
- * @details Loads retail key material, derives per-tag keys, encrypts or decrypts dumps, and generates compatible identities.
+ * @brief Amiibo key loading, authenticated decryption, UID re-keying, and dump generation.
  */
 
-#include "amiibo_crypto.h"
+#include "./amiibo_zero.h"
 
 #include <mbedtls/aes.h>
-#include <mbedtls/md.h>
+#include <mbedtls/sha256.h>
 #include <furi_hal_random.h>
 #include <string.h>
 
-/** @brief Per-tag AES and HMAC material derived from a retail key. */
+/** Derived cryptographic material for one Amiibo data/static key block. */
 typedef struct {
-    uint8_t aes_key[16]; /**< AES-128 key used for dump encryption or decryption. */
-    uint8_t aes_iv[16]; /**< Initial counter block used by AES-CTR. */
-    uint8_t hmac_key[16]; /**< HMAC key used to authenticate tag data. */
+    uint8_t aes_key[16];  /**< AES-128 key used for CTR encryption. */
+    uint8_t aes_iv[16];   /**< Initial AES-CTR counter block. */
+    uint8_t hmac_key[16]; /**< Truncated KDF output used as the HMAC key. */
 } AzDerivedKey;
 
 /**
- * @brief Compute an HMAC-SHA-256 digest.
- * @param key Cryptographic key bytes.
- * @param key_len Length of the key in bytes.
- * @param data Data buffer or tag state used by the operation.
- * @param data_len Length of the data buffer in bytes.
- * @param out Destination for the computed result.
- * @return true on success; false if the operation cannot be completed.
+ * @brief Compute one HMAC-SHA256 digest directly on the SHA-256 primitive.
+ * @details AmiiboZero only uses short 16-byte HMAC keys. Avoiding mbedtls_md keeps the generic
+ *          digest dispatcher, MD5, and SHA-1 implementations out of the FAP.
+ * @param key HMAC key bytes.
+ * @param key_len HMAC key length; must not exceed the SHA-256 64-byte block size.
+ * @param data Message bytes.
+ * @param data_len Message length.
+ * @param out Destination 32-byte digest.
+ * @return True on success.
  */
 static bool az_hmac_sha256(
     const uint8_t* key,
@@ -33,28 +34,46 @@ static bool az_hmac_sha256(
     const uint8_t* data,
     size_t data_len,
     uint8_t out[32]) {
-    const mbedtls_md_info_t* info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
-    if(!info) return false;
-    return mbedtls_md_hmac(info, key, key_len, data, data_len, out) == 0;
+    if(!key || !out || (!data && data_len) || key_len > 64U) return false;
+
+    uint8_t pad[64] = {0};
+    uint8_t inner[32];
+    memcpy(pad, key, key_len);
+    for(size_t i = 0; i < sizeof(pad); i++) pad[i] ^= 0x36U;
+
+    mbedtls_sha256_context sha;
+    mbedtls_sha256_init(&sha);
+    mbedtls_sha256_starts(&sha, 0);
+    mbedtls_sha256_update(&sha, pad, sizeof(pad));
+    if(data_len) mbedtls_sha256_update(&sha, data, data_len);
+    mbedtls_sha256_finish(&sha, inner);
+
+    for(size_t i = 0; i < sizeof(pad); i++) pad[i] ^= (0x36U ^ 0x5CU);
+    mbedtls_sha256_starts(&sha, 0);
+    mbedtls_sha256_update(&sha, pad, sizeof(pad));
+    mbedtls_sha256_update(&sha, inner, sizeof(inner));
+    mbedtls_sha256_finish(&sha, out);
+    mbedtls_sha256_free(&sha);
+    return true;
 }
 
 /**
- * @brief Validate the variable-length metadata encoded in an 80-byte retail key.
- * @param key Cryptographic key bytes.
- * @return true when the tested condition is satisfied; false otherwise.
+ * @brief Validate bounded KDF metadata embedded in one 80-byte Amiibo master-key block.
+ * @param key Master-key block.
+ * @return True when the variable magic-byte size is safe to consume.
  */
 static bool az_tag_key_valid(const uint8_t key[80]) {
     return key && key[31] <= 16;
 }
 
 /**
- * @brief Derive per-tag AES, IV, and HMAC material from a retail key and tag state.
- * @param key Cryptographic key bytes.
- * @param raw_uid Nine-byte raw Amiibo UID buffer.
+ * @brief Derive AES key, AES IV, and HMAC key material for one Amiibo master-key block.
+ * @param key 80-byte master-key block.
+ * @param raw_uid Nine-byte physical Amiibo UID representation.
  * @param write_counter Two-byte Amiibo write counter.
- * @param salt Per-tag salt bytes.
- * @param out Destination for the computed result.
- * @return true on success; false if the operation cannot be completed.
+ * @param salt Thirty-two-byte key-generation salt.
+ * @param out Destination derived-key structure.
+ * @return True when both KDF HMAC rounds succeed.
  */
 static bool az_derive_key(
     const uint8_t key[80],
@@ -100,13 +119,13 @@ static bool az_derive_key(
 }
 
 /**
- * @brief Transform a buffer with AES-128 in CTR mode.
- * @param key Cryptographic key bytes.
- * @param iv AES counter initialization value.
- * @param input Input buffer.
- * @param output Output buffer.
+ * @brief Encrypt or decrypt a byte range with AES-128 CTR.
+ * @param key AES-128 key.
+ * @param iv Initial counter block.
+ * @param input Source bytes.
+ * @param output Destination bytes; may alias input.
  * @param length Number of bytes to process.
- * @return true on success; false if the operation cannot be completed.
+ * @return True when mbedTLS completes successfully.
  */
 static bool az_aes_ctr(
     const uint8_t key[16],
@@ -138,8 +157,8 @@ static bool az_aes_ctr(
 }
 
 /**
- * @brief Generate a standard raw Amiibo UID with required manufacturer and checksum bytes.
- * @param raw_uid Nine-byte raw Amiibo UID buffer.
+ * @brief Generate a fresh Nintendo/NXP-style raw UID and recompute both BCC bytes.
+ * @param raw_uid Destination nine-byte physical UID representation.
  */
 static void az_random_raw_uid(uint8_t raw_uid[9]) {
     furi_hal_random_fill_buf(raw_uid, 9);
@@ -149,8 +168,8 @@ static void az_random_raw_uid(uint8_t raw_uid[9]) {
 }
 
 /**
- * @brief Generate a version-3 seven-byte UID with the required manufacturer prefix.
- * @param uid7 Seven-byte NFC UID buffer.
+ * @brief Generate a fresh seven-byte UID for a type-3 tag.
+ * @param uid7 Destination direct RF UID.
  */
 static void az_random_v3_uid(uint8_t uid7[7]) {
     furi_hal_random_fill_buf(uid7, 7);
@@ -158,11 +177,11 @@ static void az_random_v3_uid(uint8_t uid7[7]) {
 }
 
 /**
- * @brief Calculate the tag HMAC over the plaintext Amiibo fields covered by the tag key.
- * @param plain Plaintext Amiibo dump bytes.
- * @param tag_key Derived key used for tag authentication.
- * @param out Destination for the computed result.
- * @return true on success; false if the operation cannot be completed.
+ * @brief Calculate tag HMAC over the UID/model/salt portion of a plaintext-layout dump.
+ * @param plain Plaintext-layout 532-byte dump.
+ * @param tag_key Derived static/tag key.
+ * @param out Destination digest.
+ * @return True when HMAC generation succeeds.
  */
 static bool az_calculate_tag_hmac(
     const uint8_t plain[AZ_DUMP_SIZE],
@@ -175,12 +194,12 @@ static bool az_calculate_tag_hmac(
 }
 
 /**
- * @brief Calculate the data HMAC over plaintext Amiibo data and the tag HMAC.
- * @param plain Plaintext Amiibo dump bytes.
- * @param data_key Derived key used for encrypted Amiibo data.
- * @param tag_hmac Previously calculated tag HMAC.
- * @param out Destination for the computed result.
- * @return true on success; false if the operation cannot be completed.
+ * @brief Calculate data HMAC over all authenticated plaintext sections and tag HMAC.
+ * @param plain Plaintext-layout 532-byte dump.
+ * @param data_key Derived data key.
+ * @param tag_hmac Tag HMAC to include in the data digest.
+ * @param out Destination digest.
+ * @return True when HMAC generation succeeds.
  */
 static bool az_calculate_data_hmac(
     const uint8_t plain[AZ_DUMP_SIZE],
@@ -203,11 +222,11 @@ static bool az_calculate_data_hmac(
 }
 
 /**
- * @brief Encrypt a plaintext Amiibo dump and populate its authentication fields.
- * @param plain Plaintext Amiibo dump bytes.
- * @param keys Loaded Amiibo key material.
- * @param out_dump Destination for the resulting Amiibo dump.
- * @return true on success; false if the operation cannot be completed.
+ * @brief Sign and encrypt a plaintext-layout standard Amiibo dump.
+ * @param plain Source plaintext-layout dump with raw UID, model ID, counter, and salt already set.
+ * @param keys Valid retail keys.
+ * @param out_dump Destination encrypted dump.
+ * @return True when KDF, HMAC, and AES operations all succeed.
  */
 static bool az_encrypt_plain_dump(
     const uint8_t plain[AZ_DUMP_SIZE],
@@ -241,10 +260,10 @@ static bool az_encrypt_plain_dump(
 }
 
 /**
- * @brief Load retail Amiibo key material from persistent storage.
- * @param storage Storage service used for file operations.
- * @param keys Loaded Amiibo key material.
- * @return true on success; false if the operation cannot be completed.
+ * @brief Load and validate the user-supplied 160-byte key_retail.bin file.
+ * @param storage Open Storage service.
+ * @param keys Destination key structure.
+ * @return True only for a complete, structurally valid key file.
  */
 bool az_keys_load(Storage* storage, AzKeys* keys) {
     if(!storage || !keys) return false;
@@ -269,9 +288,9 @@ bool az_keys_load(Storage* storage, AzKeys* keys) {
 }
 
 /**
- * @brief Convert the nine-byte Amiibo UID representation into the seven-byte NFC UID.
- * @param raw_uid Nine-byte raw Amiibo UID buffer.
- * @param uid7 Seven-byte NFC UID buffer.
+ * @brief Convert Amiibo raw UID layout into the seven RF UID bytes used by Ultralight tags.
+ * @param raw_uid Nine-byte physical UID representation including BCC bytes.
+ * @param uid7 Destination seven RF UID bytes.
  */
 void az_raw_uid_to_nfc_uid(const uint8_t raw_uid[9], uint8_t uid7[7]) {
     uid7[0] = raw_uid[0];
@@ -284,9 +303,9 @@ void az_raw_uid_to_nfc_uid(const uint8_t raw_uid[9], uint8_t uid7[7]) {
 }
 
 /**
- * @brief Derive the NTAG password associated with a raw Amiibo UID.
- * @param raw_uid Nine-byte raw Amiibo UID buffer.
- * @param password Four-byte password output buffer.
+ * @brief Derive the NTAG password associated with an Amiibo raw UID.
+ * @param raw_uid Nine-byte physical UID representation.
+ * @param password Destination four-byte NTAG password.
  */
 void az_tag_password(const uint8_t raw_uid[9], uint8_t password[4]) {
     password[0] = 0xAA ^ (raw_uid[1] ^ raw_uid[4]);
@@ -296,11 +315,7 @@ void az_tag_password(const uint8_t raw_uid[9], uint8_t password[4]) {
 }
 
 /**
- * @brief Decrypt an Amiibo dump into its plaintext layout.
- * @param encrypted_dump Encrypted Amiibo dump bytes.
- * @param keys Loaded Amiibo key material.
- * @param out_plain Destination for decrypted Amiibo bytes.
- * @return true on success; false if the operation cannot be completed.
+ * @brief Authenticate and decrypt one standard encrypted Amiibo dump.
  */
 bool az_decrypt_dump(
     const uint8_t encrypted_dump[AZ_DUMP_SIZE],
@@ -338,12 +353,7 @@ bool az_decrypt_dump(
 }
 
 /**
- * @brief Assign a fresh standard UID to an encrypted dump and re-encrypt it.
- * @param encrypted_dump Encrypted Amiibo dump bytes.
- * @param keys Loaded Amiibo key material.
- * @param out_dump Destination for the resulting Amiibo dump.
- * @param out_raw_uid Destination for the generated raw UID.
- * @return true on success; false if the operation cannot be completed.
+ * @brief Re-sign an authenticated dump around a newly generated UID while preserving user/game data.
  */
 bool az_rekey_dump_uid(
     const uint8_t encrypted_dump[AZ_DUMP_SIZE],
@@ -359,12 +369,43 @@ bool az_rekey_dump_uid(
 }
 
 /**
- * @brief Assign a fresh version-3 UID to an encrypted dump and re-encrypt it.
- * @param encrypted_dump Encrypted Amiibo dump bytes.
- * @param keys Loaded Amiibo key material.
- * @param out_dump Destination for the resulting Amiibo dump.
- * @param out_uid7 Destination for the generated seven-byte UID.
- * @return true on success; false if the operation cannot be completed.
+ * @brief Re-sign an authenticated dump around an exact physical NTAG215 UID.
+ */
+bool az_rekey_dump_uid_to(
+    const uint8_t encrypted_dump[AZ_DUMP_SIZE],
+    const AzKeys* keys,
+    const uint8_t raw_uid[9],
+    uint8_t out_dump[AZ_DUMP_SIZE]) {
+    if(!encrypted_dump || !keys || !raw_uid || !out_dump) return false;
+    uint8_t plain[AZ_DUMP_SIZE];
+    if(!az_decrypt_dump(encrypted_dump, keys, plain)) return false;
+    memcpy(plain, raw_uid, 9U);
+    return az_encrypt_plain_dump(plain, keys, out_dump);
+}
+
+/**
+ * @brief Reset the writable Amiibo user-state plaintext and re-encrypt it.
+ *
+ * A retail locked Amiibo keeps the model identity and key-generation salt in locked pages.
+ * The writable state consists of the write/settings area (bytes 17-51) and the 360-byte
+ * application/user area (bytes 160-519).  The data HMAC is regenerated by the normal
+ * encryption path; the tag HMAC remains consistent because UID/model/salt are preserved.
+ */
+bool az_clear_user_data_dump(
+    const uint8_t encrypted_dump[AZ_DUMP_SIZE],
+    const AzKeys* keys,
+    uint8_t out_dump[AZ_DUMP_SIZE]) {
+    if(!encrypted_dump || !keys || !out_dump) return false;
+    uint8_t plain[AZ_DUMP_SIZE];
+    if(!az_decrypt_dump(encrypted_dump, keys, plain)) return false;
+
+    memset(plain + 17U, 0, 35U);
+    memset(plain + 160U, 0, 360U);
+    return az_encrypt_plain_dump(plain, keys, out_dump);
+}
+
+/**
+ * @brief Re-sign one type-3 crypto image around a fresh direct seven-byte UID.
  */
 bool az_rekey_v3_dump_uid(
     const uint8_t encrypted_dump[AZ_DUMP_SIZE],
@@ -394,12 +435,7 @@ bool az_rekey_v3_dump_uid(
 }
 
 /**
- * @brief Generate an encrypted standard Amiibo dump for a figure identifier.
- * @param figure_id Eight-byte Amiibo figure identifier.
- * @param keys Loaded Amiibo key material.
- * @param out_dump Destination for the resulting Amiibo dump.
- * @param out_raw_uid Destination for the generated raw UID.
- * @return true on success; false if the operation cannot be completed.
+ * @brief Generate, authenticate, and encrypt a fresh standard Amiibo dump.
  */
 bool az_generate_dump(
     const uint8_t figure_id[8],
@@ -430,12 +466,7 @@ bool az_generate_dump(
 }
 
 /**
- * @brief Generate an encrypted version-3 Amiibo dump and seven-byte UID.
- * @param figure_id Eight-byte Amiibo figure identifier.
- * @param keys Loaded Amiibo key material.
- * @param out_dump Destination for the resulting Amiibo dump.
- * @param out_uid7 Destination for the generated seven-byte UID.
- * @return true on success; false if the operation cannot be completed.
+ * @brief Generate, authenticate, and encrypt a fresh type-3 Amiibo crypto image.
  */
 bool az_generate_v3_dump(
     const uint8_t figure_id[8],
@@ -448,6 +479,8 @@ bool az_generate_v3_dump(
     memset(plain, 0, sizeof(plain));
     az_random_v3_uid(out_uid7);
 
+    /* Real v3 tags expose the seven UID bytes directly in bytes 0..6 rather than the
+     * NTAG215 BCC-interleaved layout. Byte 7 is RFU and page 2 begins 44 00 0F E0. */
     memcpy(plain, out_uid7, 7);
     plain[7] = 0x00;
     plain[8] = 0x44;

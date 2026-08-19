@@ -2,15 +2,23 @@
 
 ## Build language and ownership
 
-The procedural application/runtime modules in `src/` are C. The screen stack and UI ownership code in `src/ui/` remain C++ because they use classes, virtual screen behavior, constructors/destructors, and C++ ownership patterns. `src/ui/ui_bridge.cpp` is the narrow C-linkage boundary used by the C entrypoint to create, run, and destroy a `UiManager` session. The vendored lwJSON stream parser remains C. Current Flipper firmware builds the UI sources as C++20 with RTTI and exceptions disabled, so UI code must not depend on either feature.
+The core app logic remains C while the custom UI is C++. Each custom screen is a concrete C++ class in `src/ui/<screen>.h/.cpp`, derived from `AzUiScreen`, with its own `draw()` and `input()` methods. `src/amiibo_ui.cpp` owns ViewDispatcher integration and shared controller actions. The C/C++ boundary is declared with C linkage in `amiibo_zero.h`. App-owned code lives in `src/`; the minimal lwJSON stream parser in `third_party/lwjson/` is MIT-licensed third-party code.
 
 The application manifest uses explicit source masks:
 
 ```python
-sources=["src/*.c", "src/ui/*.cpp", "third_party/lwjson/*.c"]
+sources=["src/*.c", "src/*.cpp", "src/ui/*.cpp", "third_party/lwjson/*.c"]
 ```
 
-Do not replace this with a broad recursive pattern plus a second lwJSON pattern: uFBT can otherwise add the same lwJSON object twice and produce multiple-definition linker errors. Public backend headers use `extern "C"` guards so the C++ UI links to unmangled C backend symbols.
+Do not replace this with a broad recursive pattern. The screen `src/ui/<screen>.cpp` files are normal C++ translation units and must be compiled once. A broad recursive pattern plus a second lwJSON pattern can add the same lwJSON object twice and produce multiple-definition linker errors.
+
+## Size-build notes
+
+- `-Os`, function/data sections, linker garbage collection, and final FAP stripping are supplied by the compact Flipper/uFBT SDK build.
+- AmiiboZero implements HMAC-SHA256 directly with the SHA-256 primitive so the static mbedTLS link does not retain the generic digest dispatcher, MD5, or SHA-1 solely for HMAC.
+- Database progress scaling must remain 32-bit; progress reporting is not precise enough to justify pulling 64-bit division helpers into the FAP.
+- `tools/compact_fap.py` is an optional post-build operation that removes ordinary `.rel.*` sections only when matching `.fast.rel.*` sections are present. Keep the original FAP until the compact copy has been tested on-device.
+- Do not add `-flto` only to a subset of sources. Current uFBT does not expose a top-level per-app LTO switch in `application.fam`; compile and link LTO flags must come from a consistent build environment.
 
 ## JSON and unified index architecture
 
@@ -37,22 +45,40 @@ This stamp is deliberately a cache-freshness heuristic rather than a cryptograph
 
 ### Index records
 
-The unified index stores fixed-size records:
+The reverted unified index stores fixed-size records:
 
 - header/source stamps;
-- categories with sorted figure start ordinals;
-- figures with metadata and exact `amiibo.json` object offset/length;
-- generalized compatibility ID patterns with exact `games_info.json` member offset/length.
+- `AzCategory` records with sorted figure start ordinals;
+- complete `AzFigure` metadata records with exact `amiibo.json` object offset/length;
+- generalized compatibility ID patterns with exact `games_info.json` object offset/length.
 
-The game table is intentionally a small binary pattern table rather than a duplicate materialized compatibility database. Wildcard matching occurs against the binary records; only matching raw JSON ranges are parsed.
+The game table is a binary pattern table. Wildcard matching occurs against the indexed records and every matching JSON range is parsed into the compatibility result set.
 
 ### Index construction memory rule
 
-`amiibo.json` is parsed once: figure records are written to one temporary fixed-record file while `amiibo_series` names update the same bounded category table later in that stream. Categories are already the outer sort key, so the normal sort path no longer performs a global external merge. It groups alphabetically ordered categories into a bounded RAM batch (target 512 figure records, about 57 KiB), sequentially scans the raw temporary records to fill that batch, heap-sorts each category segment in place, and writes the batch directly into the final index. Each figure is therefore written only once during sorting instead of once per merge pass. If the temporary batch allocation cannot be satisfied, the older bounded external merge remains as a low-memory fallback.
+`amiibo.json` is streamed once into the temporary fixed-record file `amiibo.raw.tmp` while `amiibo_series` names update the bounded category array. Categories are sorted alphabetically in RAM. The normal figure sorter targets batches of up to 512 complete records, allocates enough heap slabs to contain at least the largest category, sequentially scans the raw temporary file to collect the batch's categories, heap-sorts each category segment in RAM, and writes the sorted batch directly to the final index.
 
-The batch sorter intentionally trades a small number of sequential rereads of the temporary figure file for eliminating repeated SD-card rewrites, tiny one-record merge reads, and per-pass syncs. This is substantially friendlier to slow microSD cards while still avoiding permanent retention of the complete figure database in RAM. The fallback also uses larger runs/chunks and relies on file close rather than redundant temporary-file syncs.
+The source also contains the older 128-record external-run/merge sorter, but the supplied build path sets `allow_external_sort_fallback = false`; an allocation failure therefore fails the rebuild rather than switching to that path. JSON full-file scans use a fixed 2 KiB heap buffer.
 
-`games_info.json` references are appended directly to the transactional index file, avoiding a second temporary game-reference file and copy pass. JSON full-file scans use a fixed 2 KiB heap buffer so SD reads are less chatty without increasing worker-stack pressure. A manual Setup/status refresh first frees all on-demand Saved, Games, and lock-on catalog arrays and clears the loaded `NfcDevice`, restoring the large transient allocations to their launch-state baseline before the sorter allocates its batch.
+`games_info.json` is streamed directly into compatibility reference records in the transactional index. At runtime, category/figure/search windows are read on demand from `amiibo.idx`; the complete catalog is not retained in RAM. Compatibility parsing seeks only to matching stored game ranges.
+
+## Physical NTAG215 programming
+
+Physical tag operations use Flipper's exported `NfcPoller` / `MfUltralightPoller` APIs rather than raw ST25R traffic. `nfc_poller_start_ex()` is used for ordered page-level transactions so the app controls exactly when irreversible lock pages are written; normal `MfUltralightPollerModeWrite` is intentionally not used for blank Amiibo programming because its internal page order is not the app's lock-last contract.
+
+A blank-write transaction is split into two NFC phases with crypto between them on the application thread:
+
+1. activate the tag, GET_VERSION, require NTAG215, read pages 0–3 and 130–133, reject any non-zero static/dynamic lock state or non-factory AUTH0, and capture the exact nine-byte raw UID/BCC layout;
+2. stop/free the poller; authenticate/decrypt the selected v2 dump with the existing Amiibo crypto and re-sign/re-encrypt it for the captured UID;
+3. reactivate the tag, revalidate NTAG215 + blank locks + identical UID, then program pages 3–129;
+4. write PACK and UID-derived PWD, write AUTH0, authenticate with that password, then write ACCESS/CFGLCK;
+5. write static lock page 2 and dynamic lock page 130 as the final two page transactions.
+
+The scan/write split deliberately keeps KDF/HMAC/AES work off the NFC worker thread and its stack. `tag_work_dump` is a single 532-byte transient heap allocation released on completion/cancel.
+
+For retail-tag read/save and user-data reset, do not run the generic MFUL discovery state machine. It probes READ_SIG, counters, tearing flags, and default passwords that are unrelated to the Amiibo payload and can cause an otherwise-readable tag to report `ReadFailed`. Use the extended poller at ISO14443A Ready, issue GET_VERSION, require NTAG215, read pages 0–3 to capture the live raw UID, authenticate with the UID-derived Amiibo password, then read pages 4–132 directly. Reconstruct the hidden PWD/PACK pages in the in-memory native model.
+
+For clear, the authenticated encrypted dump is reset in plaintext by clearing bytes 17–51 and 160–519, then normal HMAC/encryption code rebuilds the ciphertext. Only physical pages 4–12 and 32–129 are written back. This mirrors the writable restore ranges used by established Amiibo tooling and avoids touching UID/manufacturer/model/salt/lock/config/PWD/PACK pages. Read & save verifies the Amiibo HMACs with the loaded retail keys and saves the reconstructed native model through `NfcDevice`.
 
 ## NFC/UID mutation invariant
 
@@ -111,21 +137,18 @@ Do not assume all future Amiibo revisions use exactly the same layout merely bec
 
 Do not display unauthenticated encrypted bytes as decoded metadata.
 
-## UI architecture and state rules
+## UI state rules
 
-The custom UI is object-oriented and stack-managed:
+- Each custom screen is a full C++ class derived from `AzUiScreen`; drawing and input handling live together in that screen's `src/ui/<screen>.cpp`. `src/amiibo_ui.cpp` only forwards callbacks to the active screen object and owns shared controller actions. Shared drawing helpers live in `src/ui/ui_common.cpp`.
+- `application.fam` compiles `src/ui/*.cpp` as normal translation units; screen sources are not included into `amiibo_ui.cpp`.
+- `AZ_DEBUG_MEMORY_OVERLAY` is defined by default unless `AZ_DISABLE_MEMORY_OVERLAY` is defined. All overlay code is guarded with `#ifdef AZ_DEBUG_MEMORY_OVERLAY`; the counter is drawn last in the same custom-screen canvas callback and must never be implemented as a second fullscreen viewport.
 
-- `Screen` is the virtual base class for every custom screen. Each concrete screen owns its draw code, input handler, selection/scroll state, and any screen-scoped resources.
-- `UiManager` owns a fixed-capacity stack of `Screen` objects. Only the top screen is drawn and receives custom-view input.
-- Normal forward navigation pushes a new screen. Normal Back handling calls the top screen's virtual `onBack()` hook, then applies the returned `BackAction` only after the callback returns.
-- The base `Screen::onBack()` returns `BackAction::Pop`. A screen can return `BackAction::Cancel` to veto Back or `BackAction::Exit` to leave the app. `EmulationScreen` uses the hook to stop/synchronize NFC before allowing its pop; `WorkingScreen` cancels Back while database preparation is active.
-- A screen that needs to remove or replace itself from inside an input handler must request deferred navigation through `UiManager::schedulePop()` or `schedulePopAndPush()`. This avoids destroying a C++ object while one of its member functions is still on the call stack.
-- List selection and scroll position live in the screen object rather than global arrays. Pushing a child therefore preserves the parent's exact UI state automatically, and popping the child reveals that same parent instance.
-- Screen-owned catalogs use RAII: Saved, Lock-On, and compatibility arrays are allocated by their screen and released by its destructor.
-- `UiControls` contains reusable drawing primitives for headers, footers, list rows, scrollbars, fitted/marquee text, and wrapped detail text. Keep common rendering behavior there rather than copying it into individual screens.
-- Native Flipper `TextInput` and `ByteInput` remain auxiliary dispatcher views. Returning from them resumes the existing top custom screen instead of constructing replacement navigation state.
-- Potentially slow index validation/rebuild runs in the `AmiiboIndex` worker thread while `WorkingScreen` displays stage/percentage progress sampled from lock-free scalar fields.
+- `screen_selection[AzScreenCount]` retains the last selected row for each custom screen.
+- Before navigating away, store the current selection.
+- When returning, restore the target screen's remembered selection unless that collection shrank; clamp saved-file selection after rescans/deletes.
 - Figure detail uses the character/figure name as the header; type belongs in body text.
+- Potentially slow index validation/rebuild runs in `AmiiboIndex` worker thread while `AzScreenWorking` animates and displays stage/percentage progress sampled from lock-free scalar fields.
+- Module views (TextInput/ByteInput) return to the existing custom-screen state without resetting its selection.
 
 ## Memory and API rules
 
@@ -133,7 +156,7 @@ The custom UI is object-oriented and stack-managed:
 2. Prefer fixed record seeks and bounded final destination fields.
 3. Keep JSON read buffers small and fixed-size.
 4. Put large parser/compatibility/index contexts on the heap or a dedicated worker stack rather than the main 6 KiB FAP stack.
-5. Do not retain the complete figure database in RAM.
+5. Do not retain the complete figure database in RAM; read bounded category/figure/search windows from the seek index.
 6. Avoid unavailable external-app libc imports previously known to break FAP linking (`qsort`, `bsearch`, locale ctype helpers, `atexit`).
 7. Keep native NFC writes synchronized before any save or UID mutation.
 8. Keep the raw database helper download-only; indexing belongs on-device.
@@ -156,12 +179,12 @@ The vendored lwJSON subset must retain upstream copyright/license notices and it
 
 Before packaging:
 
-- strict C++20 compile with the Flipper-style no-RTTI/no-exceptions flags and warnings treated as errors;
+- strict `gnu17` compile with `-Wall -Wextra -Werror`;
 - check stack-usage reports for unexpectedly large frames;
 - inspect unresolved imports for forbidden symbols;
 - run the unified-index synthetic test, including size-change invalidation and sampled-window same-size mutation invalidation;
-- verify indexed raw offsets begin at the expected JSON objects;
-- verify wildcard compatibility uses matching indexed ranges only;
+- verify fixed figure/category records match the source, including each figure's `amiibo.json` offset/length;
+- verify wildcard compatibility scans only matching indexed `games_info.json` ranges and combines all matches;
 - test generate → decrypt → UID re-key roundtrip with deterministic host fixtures when crypto test infrastructure is available;
 - verify both NTAG215 and v3 page mappings;
 - verify short lock-on payload padding/CRC, 64-byte normalization, and invalid-size rejection;
@@ -173,3 +196,9 @@ Before packaging:
 - test saved rename collision handling and selection restoration;
 - run Doxygen with warnings as errors when Doxygen is available;
 - run uFBT against the target firmware SDK; this remains the authoritative FAP linker/API check.
+
+## Database sort and debug overlay
+
+The database sorter is the supplied fixed-record implementation. Its normal path repeatedly performs sequential scans of `amiibo.raw.tmp` to fill bounded groups of whole categories, then sorts those category segments in RAM and writes them once to the destination index. Keep this behavior aligned with `amiibo_db.c`; do not substitute the later packed-name resident-catalog sorter unless the database implementation itself is intentionally changed again.
+
+When `AZ_DEBUG_MEMORY_OVERLAY` is enabled, the heap counter is drawn after the active AmiiboZero screen renderer in the same canvas callback. Do not implement it as a second `GuiLayerFullscreen` viewport: Flipper GUI chooses one fullscreen viewport per redraw, so a debug viewport would replace the dispatcher rather than composite over it.

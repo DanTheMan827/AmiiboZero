@@ -26,3 +26,11 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 ## pixl.js research reference
 
 `solosky/pixl.js` (GPL-2.0) was reviewed as a behavioral/interoperability reference for newer NTAG I2C Plus 2K Amiibo behavior. **No pixl.js source files are bundled or linked into Amiibo Zero.** The app's v3 implementation is separately written against observed format/layout behavior and the Flipper NFC model.
+
+## AmiiTag / TagWallet research reference
+
+`DanTheMan827/AmiiTag` and its `DanTheMan827/TagWallet` dependency were reviewed as behavioral references for physical NTAG215 Amiibo programming, especially destination-UID rebinding and the conventional page/lock write sequence. TagWallet is MIT-licensed. **No source files from either project are bundled or linked into Amiibo Zero.**
+
+## TagMo research reference
+
+`HiddenRamblings/TagMo` was reviewed as an interoperability reference for blank-tag validation and the writable page ranges used when restoring state on an already locked Amiibo. **No TagMo source files are bundled or linked into Amiibo Zero.**

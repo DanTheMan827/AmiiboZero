@@ -10,6 +10,6 @@ App(
     fap_description="Amiibo browser, generator, and emulator with persistent figure storage.",
     fap_author="DanTheMan827",
     fap_icon="icon.png",
-    sources=["src/*.c", "src/ui/*.cpp", "third_party/lwjson/*.c"],
+    sources=["src/*.c", "src/*.cpp", "src/ui/*.cpp", "third_party/lwjson/*.c"],
     fap_libs=["mbedtls"],
 )

@@ -1,17 +1,18 @@
 # Amiibo Zero for Flipper Zero
 
-Amiibo Zero is a C Flipper Zero FAP for browsing Amiibo metadata, generating Amiibo data from an 8-byte figure ID plus a user-supplied `key_retail.bin`, emulating it, saving native `.nfc` files, showing game compatibility, and preserving game-side writes.
+Amiibo Zero is a mixed C/C++ Flipper Zero FAP for browsing Amiibo metadata, generating Amiibo data from an 8-byte figure ID plus a user-supplied `key_retail.bin`, emulating it, saving native `.nfc` files, showing game compatibility, and preserving game-side writes.
 
 ## Highlights
 
 - **On-device JSON processing with lwJSON.** The raw `amiibo.json` and `games_info.json` remain authoritative and are never converted on a PC.
-- **Unified on-device seek index.** One compact `amiibo.idx` stores figure/category metadata plus byte offset/length references into both JSON files so normal browsing and compatibility lookups do not scan the full databases.
+- **Unified on-device seek index.** One `amiibo.idx` stores fixed category/figure records plus exact byte ranges into `amiibo.json` and `games_info.json`, so normal browsing/searching reads compact index records and compatibility parsing seeks only matching JSON objects.
 - **Boot-time validation.** The app validates the index when it starts and only rebuilds it when needed.
 - **Cheap source identity.** Index validation checks each JSON file size from filesystem metadata first, then fingerprints only small beginning/middle/end windows when sizes match. Normal startup no longer rereads the complete databases just to validate the cache.
 - **Category-first browser.** Categories are alphabetical; figures inside each category are alphabetical.
 - **Persistent menu position.** Returning to menus restores the previously selected row instead of jumping to the first item.
 - **Safe UID randomization while emulating.** OK stops RF, synchronizes reader writes, authenticates/decrypts the dump, changes the UID, recomputes cryptographic state, saves persistent sessions, then restarts NFC.
-- **Saved-dump management.** Rename, delete, create a fresh copy, inspect decrypted metadata, and emulate with autosave.
+- **Saved-dump management.** Rename, delete, create a fresh copy, inspect decrypted metadata, emulate with autosave, or write a saved v2 figure to a blank NTAG215.
+- **Physical NTAG215 tools.** Generated and saved v2 figures can be written to verified blank NTAG215 tags; Advanced can read/save a retail Amiibo or clear its writable user state.
 - **Advanced manual ID generation.** Enter exactly eight hexadecimal bytes with Flipper's byte editor and generate the figure even when it is absent from the metadata database.
 - **Type-3 lock-on support.** IDs whose final byte is `03` use an NTAG I2C Plus 2K layout plus a separate user-supplied lock-on/vehicle payload. Fresh generation prompts for the lock-on file, and saved type-3 figures can swap it later without regenerating the rider data.
 - **No Nintendo keys or Amiibo dumps are bundled.**
@@ -61,17 +62,21 @@ The first 80 bytes are the data key and the second 80 bytes are the static/tag k
 The binary index contains:
 
 - source size and bounded beginning/middle/end sample fingerprint for both JSON files;
-- alphabetically sorted category records and their first figure ordinal;
-- figure records containing ID, name, release date, type, category, and the exact `amiibo.json` object byte offset/length;
-- generalized compatibility ID patterns from `games_info.json` with each matching JSON member's byte offset/length.
+- alphabetically sorted fixed-size category records and their first-figure ordinals;
+- fixed `AzFigure` records containing ID, hexadecimal ID, name, North-American release date, category/type bytes, and the exact `amiibo.json` object offset/length;
+- generalized compatibility ID patterns from `games_info.json`, each with the exact matching JSON member offset/length.
 
-Compatibility lookup scans only the small binary pattern table. For matching patterns, it seeks directly to the indexed JSON object ranges and feeds only those ranges through lwJSON. Wildcard zero bytes in AmiiboAPI compatibility IDs are preserved.
+Compatibility lookup scans the compact binary pattern table. Every matching wildcard pattern is parsed from its indexed `games_info.json` range, preserving the supplied database implementation's combine-all-matches behavior.
 
 Index replacement is transactional: a stale index is retained as a temporary backup until the new temporary index is promoted successfully.
 
-Index construction is optimized for SD-card throughput: `amiibo.json` is parsed once for both figures and series names. Figure ordering is now category-batched: a bounded group of complete figure records is loaded from the unsorted temporary file, each category is heap-sorted in RAM, and the sorted records are written directly to the final index exactly once. The normal path therefore avoids rewriting the full figure table on every merge pass; a lower-memory external merge remains only as an allocation-failure fallback. `games_info.json` references are appended directly to the new index, and JSON reads use a fixed 2 KiB buffer. The raw JSON files remain authoritative.
+Index construction follows the supplied database implementation. `amiibo.json` is streamed once into fixed figure records in `amiibo.raw.tmp` while categories are collected in RAM. Categories are sorted in RAM. The normal figure sort groups whole categories into a bounded heap batch, sequentially rescans the temporary raw-record file to fill that batch, heap-sorts each category segment in RAM, and writes the completed batch directly to the final index. The older external-run/merge implementation remains in the source but the supplied build path keeps its fallback disabled. `games_info.json` references are appended directly to the index.
 
 ## UI
+
+The custom UI is organized as full C++ screen classes. Every `src/ui/<screen>.h/.cpp` pair defines one class derived from `AzUiScreen`; the class owns both drawing and input behavior for that screen. `src/amiibo_ui.cpp` owns the ViewDispatcher, shared actions/navigation, and selects the active screen object. `ui_common.*` contains shared drawing helpers. The screen sources are normal translation units rather than macro include fragments.
+
+A bottom-right heap usage overlay is enabled by default for debugging. It is compiled behind `#ifdef AZ_DEBUG_MEMORY_OVERLAY` and is drawn last in the same canvas callback as the active AmiiboZero screen, so it does not replace or clear the underlying fullscreen view. Define `AZ_DISABLE_MEMORY_OVERLAY` to omit it.
 
 ### Home
 
@@ -85,17 +90,21 @@ Index construction is optimized for SD-card throughput: `amiibo.json` is parsed 
 
 The header is the Amiibo/character name. Type and ID are shown in the detail body.
 
-For a database/manual figure:
+For a database/manual v2 figure:
 
 - Emulate once
 - Save + emulate
+- Write to blank tag
 - Compatibility
 
-For a saved standard figure:
+Type-3 figures omit **Write to blank tag**.
+
+For a saved standard v2 figure:
 
 - Emulate + autosave
 - Dump details
 - Compatibility
+- Write to blank tag
 - Rename
 - Fresh copy
 - Delete
@@ -114,6 +123,14 @@ When the dump authenticates with the supplied retail keys, the detail screen sho
 - application ID, application area ID, and application write counter.
 
 For saved type-3 figures the detail screen also reports whether the companion lock-on response is attached or missing. Uninitialized Amiibo may legitimately contain none of the user fields above.
+
+### Physical NTAG215 tools
+
+**Write to blank tag** is available only for standard/v2 figures. The writer first issues NTAG GET_VERSION and rejects anything that does not identify as NTAG215. It also checks that static/dynamic lock bits are still clear before any programming. Amiibo Zero reads the destination tag UID, authenticates/decrypts the selected encrypted dump with the existing crypto implementation, substitutes that physical UID, recomputes both HMACs, and re-encrypts the payload. The tag is checked again immediately before writing so swapping tags between scan and programming is rejected.
+
+Programming deliberately commits irreversible protection last. Pages 3–129 are written first, followed by PACK and the UID-derived password. AUTH0 is written next, the writer authenticates with the new password, and ACCESS/CFGLCK is written only after authentication. Page-2 static lock bytes and page-130 dynamic lock bytes are the final two writes. This follows the established NTAG215 Amiibo programming layout while honoring the stronger invariant that lock bits are never written before all ordinary data/configuration is complete.
+
+Advanced also provides **Read & save Amiibo** and **Clear tag user data**. Both operations now use a direct NTAG215 scan: GET_VERSION, read the live UID, authenticate with the UID-derived Amiibo password, and read pages 0–132 directly. This deliberately bypasses the generic MFUL reader's unrelated READ_SIG/counter/tearing probes, so failure of those optional commands cannot abort an Amiibo read. Read & save verifies the encrypted payload with `key_retail.bin`, reconstructs hidden PWD/PACK fields in the native Flipper model, and saves it into `figures/`. Clear user data decrypts the authenticated page image, resets writable user-state plaintext, recomputes/encrypts it, and writes only pages 4–12 and 32–129. UID/manufacturer bytes, model/salt pages, lock bytes, password, PACK, and configuration pages are not rewritten by clear.
 
 ### Advanced manual ID
 
@@ -163,11 +180,11 @@ The type-3 implementation was independently written from observed format behavio
 
 - Neither JSON database is loaded wholly into RAM.
 - lwJSON stream parsers are allocated only for active scans.
-- Full JSON scans use 2 KiB reads; indexed object-range reads use 512-byte chunks.
-- Index records are fixed-size and read by seek.
-- Category memory is bounded by `AZ_MAX_CATEGORIES` during index construction.
-- The UI retains only the visible four figure/category rows.
-- Compatibility parsing only enters JSON ranges selected by the binary index.
+- Full JSON scans use 2 KiB reads; indexed standalone-object reads use 512-byte chunks.
+- The complete figure/category catalog is not retained in RAM. Visible rows are read from fixed records in `amiibo.idx`.
+- Each indexed figure stores its fixed metadata plus the exact `amiibo.json` object offset/length; compatibility patterns retain exact `games_info.json` object ranges.
+- Category and figure names are stored inside fixed index records; browsing and search read only the bounded index records needed for the current window or search scan.
+- Compatibility parsing scans the binary wildcard table and seeks to each matching `games_info.json` offset/length range.
 - Saved-file and compatibility catalogs are allocated only while those workflows are open and are released when the user leaves them.
 - Large database work is moved to a dedicated worker with its own bounded stack.
 
@@ -186,17 +203,16 @@ The manifest intentionally uses explicit source masks so vendored `lwjson_stream
 
 ```text
 application.fam
-src/amiibo_zero.c        app lifetime and service ownership
-src/amiibo_zero.h          shared runtime models and application entry declaration
-src/amiibo_crypto.c/.h   generation, authentication, decrypt/re-key/encrypt
-src/amiibo_db.c/.h       lwJSON scans and unified JSON seek index
-src/amiibo_nfc.c/.h      NTAG215 plus stock-derived NTAG I2C Plus 2K emulation
-src/amiibo_storage.c/.h  saved library, lock-on payloads, rename/delete, file naming
-src/ui/ui_bridge.cpp/.h       C linkage bridge for one C++ UI-manager session
-src/ui/ui_screen.cpp/.h       virtual Screen base class and Back/navigation contract
-src/ui/ui_manager.cpp/.h      screen-stack owner, dispatcher bridge, modal inputs, UI actions
-src/ui/ui_controls.cpp/.h     reusable drawing controls
-src/ui/ui_screens.cpp/.h      concrete screen classes and per-screen input handlers
+src/amiibo_zero.c          app lifetime and service ownership
+src/amiibo_zero.h          shared documented models and public APIs
+src/amiibo_crypto.c        generation, authentication, decrypt/re-key/encrypt
+src/amiibo_db.c            lwJSON scans and unified JSON seek index
+src/amiibo_nfc.c           NTAG215 plus stock-derived NTAG I2C Plus 2K emulation
+src/amiibo_storage.c       saved library, lock-on payloads, rename/delete, file naming
+src/amiibo_ui.cpp          central input/navigation controller + UI ownership
+src/ui/*.cpp               per-screen C++ renderer translation units
+src/ui/*.h                 per-screen renderer declarations
+src/ui/ui_common.cpp       shared drawing helpers
 third_party/lwjson/        minimal MIT lwJSON streaming subset
 tools/fetch_databases.py   raw database downloader only
 docs/DEVELOPMENT.md
@@ -204,9 +220,19 @@ Doxyfile
 THIRD_PARTY_NOTICES.md
 ```
 
+## Optional post-build FAP compaction
+
+Current Flipper tooling adds `.fast.rel.*` relocation data but retains the original `.rel.*` sections for compatibility. After a successful uFBT build, `tools/compact_fap.py` can create a second FAP with the redundant standard relocation sections removed. It refuses to do so unless every removable `.rel.*` section has a matching `.fast.rel.*` section.
+
+```powershell
+python tools/compact_fap.py dist/amiibo_zero.fap
+```
+
+The normal uFBT-produced FAP is left untouched. Test the compact copy on the target firmware before distributing it. LTO is intentionally not forced by the project because current uFBT does not expose a top-level per-app compile/link flag in `application.fam`; LTO must be enabled consistently by the SDK/build environment if you choose to benchmark it.
+
 ## Documentation
 
-Every app-owned source/header begins with an `@file` block. Functions, callbacks, structs, enums, public APIs, and significant fields/constants are Doxygen documented, including static implementation helpers. `Doxyfile` extracts static symbols and treats documentation warnings as errors.
+Every app-owned C file begins with an `@file` block. Functions, callbacks, structs, enums, public APIs, and significant fields/constants are Doxygen documented, including static implementation helpers. `Doxyfile` extracts static symbols and treats documentation warnings as errors.
 
 ## References
 

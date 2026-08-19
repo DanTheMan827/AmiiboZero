@@ -463,6 +463,21 @@ static void az_progress_emit(
 }
 
 /**
+ * @brief Scale a bounded 32-bit value without promoting the division to 64 bits.
+ * @details Progress spans are at most 100. Values are shifted together until value * scale
+ *          cannot overflow uint32_t, preserving the ratio closely enough for UI percentages.
+ */
+static uint32_t az_progress_scale_u32(uint32_t value, uint32_t total, uint32_t scale) {
+    if(total == 0U || scale == 0U) return 0U;
+    if(value >= total) return scale;
+    while(total > UINT32_MAX / scale) {
+        total = (total + 1U) >> 1U;
+        value = (value + 1U) >> 1U;
+    }
+    return (value * scale) / total;
+}
+
+/**
  * @brief Initialize byte-based progress mapping for one database stage.
  * @param reporter Byte-progress reporter state.
  * @param callback Callback invoked while processing data.
@@ -502,7 +517,7 @@ static void az_progress_report_bytes(AzProgressReporter* reporter, uint32_t cons
     uint8_t percent = reporter->end_percent;
     if(reporter->total_bytes > 0U && consumed < reporter->total_bytes) {
         uint32_t span = (uint32_t)(reporter->end_percent - reporter->start_percent);
-        uint32_t scaled = ((uint64_t)consumed * span) / reporter->total_bytes;
+        uint32_t scaled = az_progress_scale_u32(consumed, reporter->total_bytes, span);
         percent = (uint8_t)(reporter->start_percent + scaled);
     }
     if(percent != reporter->last_percent) {
@@ -1497,7 +1512,7 @@ static bool az_write_sorted_figure_batches(
         if(!ok) break;
 
         emitted += batch_count;
-        uint8_t percent = (uint8_t)(45U + ((uint64_t)emitted * 23U) / figure_count);
+        uint8_t percent = (uint8_t)(45U + az_progress_scale_u32(emitted, figure_count, 23U));
         if(percent > 68U) percent = 68U;
         az_progress_emit(progress_callback, progress_context, AzDbProgressSorting, percent);
         batch_start = batch_end;
@@ -1590,7 +1605,7 @@ static bool az_create_sorted_runs(
             break;
         }
         processed += chunk;
-        uint8_t percent = figure_count ? (uint8_t)(45U + ((uint64_t)processed * 8U) / figure_count) : 53U;
+        uint8_t percent = figure_count ? (uint8_t)(45U + az_progress_scale_u32(processed, figure_count, 8U)) : 53U;
         az_progress_emit(progress_callback, progress_context, AzDbProgressSorting, percent);
     }
     free(records);
@@ -1764,7 +1779,7 @@ static bool az_prepare_sorted_figures(
         source_path = destination_path;
         destination_path = swap;
         if(run_size <= UINT32_MAX / 2U) run_size *= 2U;
-        uint8_t percent = (uint8_t)(53U + ((uint64_t)(pass + 1U) * 15U) / pass_count);
+        uint8_t percent = (uint8_t)(53U + az_progress_scale_u32(pass + 1U, pass_count, 15U));
         az_progress_emit(progress_callback, progress_context, AzDbProgressSorting, percent);
     }
     if(pass_count == 0U) {
@@ -1815,7 +1830,7 @@ static bool az_copy_file_bytes(
         copied += (uint32_t)read;
         uint32_t span = (uint32_t)(end_percent - start_percent);
         uint8_t percent = byte_count ?
-                              (uint8_t)(start_percent + ((uint64_t)copied * span) / byte_count) :
+                              (uint8_t)(start_percent + az_progress_scale_u32(copied, byte_count, span)) :
                               end_percent;
         az_progress_emit(progress_callback, progress_context, AzDbProgressSorting, percent);
     }

@@ -1,53 +1,21 @@
 /**
  * @file amiibo_storage.c
- * @brief Persistent file and Lock-On storage helpers.
- * @details Scans saved tags and Lock-On payloads, validates companion data, and manages file naming, rename, and deletion operations.
+ * @brief Saved-figure and type-3 lock-on storage, naming, sorting, and lifecycle handling.
  */
 
-#include "amiibo_storage.h"
-#include "amiibo_nfc.h"
+#include "./amiibo_zero.h"
 
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
 
 /**
- * @brief Refresh presence information for the external application data files.
- * @param storage Storage service used for file operations.
- * @param out Destination status structure.
- */
-void az_storage_check_data_files(Storage* storage, AzDataFiles* out) {
-    if(!out) return;
-    memset(out, 0, sizeof(*out));
-    if(!storage) return;
-
-    out->key_retail = storage_file_exists(storage, AZ_KEYS_FILE);
-    out->amiibo_json = storage_file_exists(storage, AZ_AMIIBO_JSON);
-    out->games_json = storage_file_exists(storage, AZ_GAMES_JSON);
-}
-
-/**
- * @brief Return whether every required external data file is present.
- * @param files Data-file presence state to inspect.
- * @return true when key_retail.bin and amiibo.json are both present.
- */
-bool az_storage_required_data_present(const AzDataFiles* files) {
-    return files && files->key_retail && files->amiibo_json;
-}
-
-/**
- * @brief Build the absolute figures-directory path for a saved filename.
- * @param filename Filename relative to the relevant application data directory.
- * @param out Destination for the computed result.
- * @param out_size Destination for the resulting size.
- * @return true on success; false if the operation cannot be completed.
+ * @brief Build a full saved-figure path from a trusted basename.
  */
 static bool az_saved_full_path(const char* filename, char* out, size_t out_size);
 
 /**
- * @brief Test whether a byte is an ASCII letter or digit.
- * @param c ASCII character or byte to inspect.
- * @return true on success; false if the operation cannot be completed.
+ * @brief Test whether one byte is an ASCII letter or decimal digit.
  */
 static bool az_ascii_isalnum(unsigned char c) {
     return ((c >= '0') && (c <= '9')) || ((c >= 'A') && (c <= 'Z')) ||
@@ -55,11 +23,7 @@ static bool az_ascii_isalnum(unsigned char c) {
 }
 
 /**
- * @brief Append a string to a bounded NUL-terminated buffer.
- * @param dst Destination string buffer.
- * @param dst_size Capacity of the destination string buffer, including the terminator.
- * @param src Source string; NULL is treated as empty.
- * @return true on success; false if the operation cannot be completed.
+ * @brief Append a string to a bounded destination without truncation overflow.
  */
 static bool az_append(char* dst, size_t dst_size, const char* src) {
     if(!dst || !src || dst_size == 0) return false;
@@ -84,13 +48,7 @@ static bool az_append(char* dst, size_t dst_size, const char* src) {
 }
 
 /**
- * @brief Assemble a saved-figure path from a sanitized name, identifier, and suffix.
- * @param out Destination for the computed result.
- * @param out_size Destination for the resulting size.
- * @param safe_name Sanitized filename component.
- * @param id_hex Canonical hexadecimal Amiibo identifier.
- * @param suffix Filename suffix to append.
- * @return true on success; false if the operation cannot be completed.
+ * @brief Assemble one bounded saved-figure path from sanitized components.
  */
 static bool az_build_save_path(
     char* out,
@@ -106,9 +64,7 @@ static bool az_build_save_path(
 }
 
 /**
- * @brief Check whether a filename has the expected NFC file extension.
- * @param name Display name.
- * @return true when the tested condition is satisfied; false otherwise.
+ * @brief Check whether a filename ends in .nfc case-insensitively.
  */
 static bool az_has_nfc_extension(const char* name) {
     const char* dot = strrchr(name, '.');
@@ -117,19 +73,14 @@ static bool az_has_nfc_extension(const char* name) {
 }
 
 /**
- * @brief Compare saved-figure entries for catalog ordering.
- * @param a Left comparison operand.
- * @param b Right comparison operand.
- * @return A negative, zero, or positive value when the left operand sorts before, equal to, or after the right operand.
+ * @brief Compare saved entries alphabetically by their display names.
  */
 static int az_saved_compare(const AzSavedEntry* a, const AzSavedEntry* b) {
     return strcasecmp(a->display_name, b->display_name);
 }
 
 /**
- * @brief Sort saved-figure catalog entries.
- * @param entries Entry array to sort or update.
- * @param count Number of records or elements.
+ * @brief Insertion-sort the bounded saved-entry array alphabetically.
  */
 static void az_saved_sort(AzSavedEntry* entries, uint16_t count) {
     for(uint16_t i = 1; i < count; i++) {
@@ -144,19 +95,14 @@ static void az_saved_sort(AzSavedEntry* entries, uint16_t count) {
 }
 
 /**
- * @brief Compare Lock-On entries for catalog ordering.
- * @param a Left comparison operand.
- * @param b Right comparison operand.
- * @return A negative, zero, or positive value when the left operand sorts before, equal to, or after the right operand.
+ * @brief Compare lock-on entries alphabetically by display name.
  */
 static int az_lockon_compare(const AzLockOnEntry* a, const AzLockOnEntry* b) {
     return strcasecmp(a->display_name, b->display_name);
 }
 
 /**
- * @brief Sort Lock-On catalog entries.
- * @param entries Entry array to sort or update.
- * @param count Number of records or elements.
+ * @brief Insertion-sort the bounded lock-on catalog alphabetically.
  */
 static void az_lockon_sort(AzLockOnEntry* entries, uint16_t count) {
     for(uint16_t i = 1; i < count; i++) {
@@ -171,10 +117,7 @@ static void az_lockon_sort(AzLockOnEntry* entries, uint16_t count) {
 }
 
 /**
- * @brief Calculate the CRC-16 used by Lock-On payload files.
- * @param data Data buffer or tag state used by the operation.
- * @param length Number of bytes to process.
- * @return The computed result value.
+ * @brief Compute CRC16-MCRF4XX for one normalized lock-on response.
  */
 static uint16_t az_lockon_crc16(const uint8_t* data, size_t length) {
     uint16_t crc = 0xFFFFU;
@@ -188,17 +131,14 @@ static uint16_t az_lockon_crc16(const uint8_t* data, size_t length) {
 }
 
 /**
- * @brief Check whether a Lock-On file size is within the supported payload range.
- * @param size Number of bytes in the supplied buffer or file.
- * @return true when the tested condition is satisfied; false otherwise.
+ * @brief Return whether a lock-on source size is supported.
  */
 static bool az_lockon_size_valid(uint64_t size) {
     return (size >= 1U && size <= AZ_LOCKON_PAYLOAD_MAX) || size == AZ_LOCKON_SRAM_SIZE;
 }
 
 /**
- * @brief Create the application data directories required for persistent storage.
- * @param storage Storage service used for file operations.
+ * @brief Create the application data and saved-figure directories when missing.
  */
 void az_storage_init(Storage* storage) {
     if(!storage) return;
@@ -208,11 +148,7 @@ void az_storage_init(Storage* storage) {
 }
 
 /**
- * @brief Enumerate saved Amiibo NFC files into a sorted catalog.
- * @param storage Storage service used for file operations.
- * @param out Destination for the computed result.
- * @param max_entries Maximum supported entries.
- * @return The resulting count.
+ * @brief Scan, validate, resolve, and alphabetize saved native NFC files.
  */
 uint16_t az_saved_scan(Storage* storage, AzSavedEntry* out, uint16_t max_entries) {
     if(!storage || !out || max_entries == 0) return 0;
@@ -246,6 +182,7 @@ uint16_t az_saved_scan(Storage* storage, AzSavedEntry* out, uint16_t max_entries
         entry->valid = az_nfc_load_device(device, path) && az_nfc_extract_figure_id(device, entry->id);
         if(!entry->valid) continue;
 
+        /* Saved-menu labels deliberately follow the filename so user renames are visible. */
         az_str_copy(entry->display_name, sizeof(entry->display_name), name);
         char* dot = strrchr(entry->display_name, '.');
         if(dot) *dot = 0;
@@ -260,11 +197,7 @@ uint16_t az_saved_scan(Storage* storage, AzSavedEntry* out, uint16_t max_entries
 }
 
 /**
- * @brief Enumerate valid Lock-On payload files into a sorted catalog.
- * @param storage Storage service used for file operations.
- * @param out Destination for the computed result.
- * @param max_entries Maximum supported entries.
- * @return The resulting count.
+ * @brief Scan small user-supplied lock-on payloads without retaining their contents in RAM.
  */
 uint16_t az_lockon_scan(Storage* storage, AzLockOnEntry* out, uint16_t max_entries) {
     if(!storage || !out || max_entries == 0) return 0;
@@ -300,11 +233,7 @@ uint16_t az_lockon_scan(Storage* storage, AzLockOnEntry* out, uint16_t max_entri
 }
 
 /**
- * @brief Load and validate a Lock-On SRAM payload by filename.
- * @param storage Storage service used for file operations.
- * @param filename Filename relative to the relevant application data directory.
- * @param out_sram Destination Lock-On SRAM buffer.
- * @return true on success; false if the operation cannot be completed.
+ * @brief Load a lock-on payload and synthesize/repair its two-byte transport CRC.
  */
 bool az_lockon_load(
     Storage* storage,
@@ -340,11 +269,7 @@ bool az_lockon_load(
 }
 
 /**
- * @brief Build the companion Lock-On path for a saved figure filename.
- * @param saved_filename Saved figure filename.
- * @param out Destination for the computed result.
- * @param out_size Destination for the resulting size.
- * @return true on success; false if the operation cannot be completed.
+ * @brief Build the companion lock-on sidecar path for one saved .nfc basename.
  */
 static bool az_saved_lockon_path(const char* saved_filename, char* out, size_t out_size) {
     if(!saved_filename || !out || out_size == 0) return false;
@@ -360,12 +285,12 @@ static bool az_saved_lockon_path(const char* saved_filename, char* out, size_t o
 }
 
 /**
- * @brief Build a temporary or alternate companion Lock-On work path.
- * @param saved_filename Saved figure filename.
- * @param suffix Filename suffix to append.
- * @param out Destination for the computed result.
- * @param out_size Destination for the resulting size.
- * @return true on success; false if the operation cannot be completed.
+ * @brief Append one internal suffix to a validated saved lock-on path.
+ * @param saved_filename Saved .nfc basename.
+ * @param suffix Internal suffix such as .tmp or .bak.
+ * @param out Destination path.
+ * @param out_size Destination capacity.
+ * @return True when the path fit without truncation.
  */
 static bool az_saved_lockon_work_path(
     const char* saved_filename,
@@ -384,11 +309,7 @@ static bool az_saved_lockon_work_path(
 }
 
 /**
- * @brief Load the Lock-On companion payload associated with a saved figure.
- * @param storage Storage service used for file operations.
- * @param saved_filename Saved figure filename.
- * @param out_sram Destination Lock-On SRAM buffer.
- * @return true on success; false if the operation cannot be completed.
+ * @brief Load one app-owned saved lock-on sidecar and verify its CRC.
  */
 bool az_saved_lockon_load(
     Storage* storage,
@@ -414,11 +335,7 @@ bool az_saved_lockon_load(
 }
 
 /**
- * @brief Persist a Lock-On companion payload for a saved figure.
- * @param storage Storage service used for file operations.
- * @param saved_filename Saved figure filename.
- * @param sram Lock-On SRAM payload.
- * @return true on success; false if the operation cannot be completed.
+ * @brief Write one normalized 64-byte lock-on response beside a saved .nfc file.
  */
 bool az_saved_lockon_save(
     Storage* storage,
@@ -440,6 +357,7 @@ bool az_saved_lockon_save(
         return false;
     }
 
+    /* Write and sync a complete replacement before touching the current sidecar. */
     if(storage_common_exists(storage, tmp_path)) storage_common_remove(storage, tmp_path);
     File* file = storage_file_alloc(storage);
     if(!file) return false;
@@ -473,10 +391,7 @@ bool az_saved_lockon_save(
 }
 
 /**
- * @brief Convert arbitrary display text into a filesystem-safe save-name component.
- * @param in Input text to sanitize.
- * @param out Destination for the computed result.
- * @param out_size Destination for the resulting size.
+ * @brief Convert a figure name into a filesystem-safe filename component.
  */
 static void az_sanitize_filename(const char* in, char* out, size_t out_size) {
     size_t p = 0;
@@ -500,33 +415,42 @@ static void az_sanitize_filename(const char* in, char* out, size_t out_size) {
 }
 
 /**
- * @brief Build an unused save path derived from figure metadata.
- * @param storage Storage service used for file operations.
- * @param figure Figure metadata.
- * @param out Destination for the computed result.
- * @param out_size Destination for the resulting size.
+ * @brief Choose a non-colliding persistent path for a newly saved figure.
  */
-void az_make_unique_save_path(Storage* storage, const AzFigure* figure, char* out, size_t out_size) {
+void az_make_unique_save_path(
+    Storage* storage,
+    const AzFigure* figure,
+    const char* display_name,
+    char* out,
+    size_t out_size) {
     if(!storage || !figure || !out || out_size == 0) return;
     char safe[48];
-    az_sanitize_filename(figure->name, safe, sizeof(safe));
+    az_sanitize_filename(display_name && display_name[0] ? display_name : "amiibo", safe, sizeof(safe));
+    char id_hex[17];
+    static const char hex[] = "0123456789abcdef";
+    for(size_t i = 0U; i < 8U; i++) {
+        id_hex[i * 2U] = hex[figure->id[i] >> 4];
+        id_hex[i * 2U + 1U] = hex[figure->id[i] & 0x0FU];
+    }
+    id_hex[16] = '\0';
 
-    if(!az_build_save_path(out, out_size, safe, figure->id_hex, ".nfc")) return;
+    if(!az_build_save_path(out, out_size, safe, id_hex, ".nfc")) return;
     if(!storage_common_exists(storage, out)) return;
 
     for(unsigned i = 2; i < 1000; i++) {
         char suffix[16];
         snprintf(suffix, sizeof(suffix), "-%u.nfc", i);
-        if(!az_build_save_path(out, out_size, safe, figure->id_hex, suffix)) return;
+        if(!az_build_save_path(out, out_size, safe, id_hex, suffix)) return;
         if(!storage_common_exists(storage, out)) return;
     }
 }
 
+
 /**
- * @brief Normalize a requested saved-figure name before rename processing.
- * @param in Input text to sanitize.
- * @param out Destination for the computed result.
- * @param out_size Destination for the resulting size.
+ * @brief Sanitize a user-entered saved-file basename while preserving readable separators.
+ * @param in User-entered text, optionally ending in .nfc.
+ * @param out Destination basename without extension.
+ * @param out_size Destination capacity.
  */
 static void az_sanitize_rename(const char* in, char* out, size_t out_size) {
     if(!out || out_size == 0) return;
@@ -557,11 +481,11 @@ static void az_sanitize_rename(const char* in, char* out, size_t out_size) {
 }
 
 /**
- * @brief Build the absolute figures-directory path for a saved filename.
- * @param filename Filename relative to the relevant application data directory.
- * @param out Destination for the computed result.
- * @param out_size Destination for the resulting size.
- * @return true on success; false if the operation cannot be completed.
+ * @brief Build a full saved-figure path from a trusted basename.
+ * @param filename Basename only.
+ * @param out Destination path.
+ * @param out_size Destination capacity.
+ * @return True when the path fit without truncation.
  */
 static bool az_saved_full_path(const char* filename, char* out, size_t out_size) {
     if(!filename || !out || out_size == 0 || strchr(filename, '/') || strchr(filename, '\\')) return false;
@@ -575,10 +499,10 @@ static bool az_saved_full_path(const char* filename, char* out, size_t out_size)
 }
 
 /**
- * @brief Check whether a saved filename is currently unused.
- * @param storage Storage service used for file operations.
- * @param filename Filename relative to the relevant application data directory.
- * @return true when the tested condition is satisfied; false otherwise.
+ * @brief Return whether a candidate saved basename is free of both NFC and lock-on artifacts.
+ * @param storage Open Storage service.
+ * @param filename Candidate .nfc basename.
+ * @return True when neither the NFC file nor its companion sidecar already exists.
  */
 static bool az_saved_name_available(Storage* storage, const char* filename) {
     if(!storage || !filename) return false;
@@ -593,13 +517,7 @@ static bool az_saved_name_available(Storage* storage, const char* filename) {
 }
 
 /**
- * @brief Rename a saved figure and its companion Lock-On data.
- * @param storage Storage service used for file operations.
- * @param old_filename Current saved figure filename.
- * @param requested_name User-requested replacement display name.
- * @param out_filename Destination for the final saved filename.
- * @param out_size Destination for the resulting size.
- * @return true on success; false if the operation cannot be completed.
+ * @brief Rename one saved NFC file to a sanitized non-colliding basename.
  */
 bool az_saved_rename(
     Storage* storage,
@@ -648,7 +566,7 @@ bool az_saved_rename(
 
     if(storage_common_rename(storage, old_path, new_path) != FSE_OK) return false;
     if(has_lockon && storage_common_rename(storage, old_lockon, new_lockon) != FSE_OK) {
-
+        /* Keep the pair together when possible; failure still reports the rename as unsuccessful. */
         storage_common_rename(storage, new_path, old_path);
         return false;
     }
@@ -657,16 +575,15 @@ bool az_saved_rename(
 }
 
 /**
- * @brief Delete a saved figure and any companion Lock-On data.
- * @param storage Storage service used for file operations.
- * @param filename Filename relative to the relevant application data directory.
- * @return true on success; false if the operation cannot be completed.
+ * @brief Delete one saved figure and its optional lock-on sidecar after path validation.
  */
 bool az_saved_delete(Storage* storage, const char* filename) {
     if(!storage || !filename || strchr(filename, '/') || strchr(filename, '\\')) return false;
     char path[AZ_PATH_MAX];
     if(!az_saved_full_path(filename, path, sizeof(path))) return false;
 
+    /* Delete the primary object first.  A failed sidecar cleanup can only leave an
+     * ignored orphan, whereas deleting the sidecar first could strand a type-3 NFC file. */
     if(storage_common_remove(storage, path) != FSE_OK) return false;
 
     char lockon_path[AZ_PATH_MAX];

@@ -1,28 +1,26 @@
 /**
  * @file amiibo_nfc.c
- * @brief NFC device construction and Amiibo emulation.
- * @details Creates standard and version-3 tag images, implements listener behavior, validates dumps, and extracts tag metadata.
+ * @brief Standard NTAG215 and type-3 NTAG I2C Plus 2K Amiibo device handling.
  */
 
-#include "amiibo_nfc.h"
-#include "amiibo_crypto.h"
+#include "./amiibo_zero.h"
+#include "./amiibo_db.h"
 
 #include <nfc/protocols/iso14443_3a/iso14443_3a.h>
 #include <nfc/protocols/iso14443_3a/iso14443_3a_listener.h>
+#include <nfc/protocols/iso14443_3a/iso14443_3a_poller.h>
 #include <nfc/protocols/mf_ultralight/mf_ultralight.h>
+#include <nfc/protocols/mf_ultralight/mf_ultralight_poller.h>
 #include <stdio.h>
 #include <string.h>
 
-/** @brief Constant used for version-3 shift start. */
+/** Byte offset where the type-3 layout inserts its 0x40-byte nonce window. */
 #define AZ_V3_SHIFT_START 0x80U
-
-/** @brief Constant used for version-3 shift size. */
+/** Size of the type-3 nonce window inserted into the physical tag layout. */
 #define AZ_V3_SHIFT_SIZE 0x40U
 
 /**
- * @brief Return a display label for an Amiibo type code.
- * @param type Type or event code to interpret.
- * @return Pointer to the selected text, or NULL when no text is available.
+ * @brief Return a display label for one model type byte.
  */
 const char* az_figure_type_name(uint8_t type) {
     switch(type) {
@@ -34,67 +32,49 @@ const char* az_figure_type_name(uint8_t type) {
 }
 
 /**
- * @brief Determine whether an Amiibo identifier uses the version-3 layout.
- * @param id Eight-byte Amiibo identifier.
- * @return true when the tested condition is satisfied; false otherwise.
+ * @brief Identify the newer type-3/lock-on Amiibo format used by pixl.js.
  */
 bool az_figure_is_v3(const uint8_t id[8]) {
     return id && id[7] == 0x03;
 }
 
-/** @brief Constant used for NFC cmd read. */
+/** Type-2 READ command. */
 #define AZ_NFC_CMD_READ 0x30U
-
-/** @brief Constant used for NFC cmd write. */
+/** Type-2 WRITE command. */
 #define AZ_NFC_CMD_WRITE 0xA2U
-
-/** @brief Constant used for NFC cmd get version. */
+/** NTAG GET_VERSION command. */
 #define AZ_NFC_CMD_GET_VERSION 0x60U
-
-/** @brief Constant used for NFC cmd read sig. */
+/** NTAG READ_SIG command. */
 #define AZ_NFC_CMD_READ_SIG 0x3CU
-
-/** @brief Constant used for NFC cmd pwd auth. */
+/** NTAG PWD_AUTH command. */
 #define AZ_NFC_CMD_PWD_AUTH 0x1BU
-
-/** @brief Constant used for NFC cmd fast read. */
+/** NTAG FAST_READ command. */
 #define AZ_NFC_CMD_FAST_READ 0x3AU
-
-/** @brief Constant used for NFC cmd fast write. */
+/** NTAG I2C Plus FAST_WRITE command used for the SRAM request. */
 #define AZ_NFC_CMD_FAST_WRITE 0xA6U
-
-/** @brief Constant used for NFC cmd sector select. */
+/** NTAG I2C SECTOR_SELECT command. */
 #define AZ_NFC_CMD_SECTOR_SELECT 0xC2U
-
-/** @brief Constant used for NFC cmd comp write. */
+/** MFUL compatible-write command (unsupported by I2C Plus, but state outcome is defined). */
 #define AZ_NFC_CMD_COMP_WRITE 0xA0U
-
-/** @brief Constant used for NFC cmd read cnt. */
+/** MFUL counter-read command (unsupported by I2C Plus). */
 #define AZ_NFC_CMD_READ_CNT 0x39U
-
-/** @brief Constant used for NFC cmd incr cnt. */
+/** MFUL counter-increment command (unsupported by I2C Plus). */
 #define AZ_NFC_CMD_INCR_CNT 0xA5U
-
-/** @brief Constant used for NFC cmd check tearing. */
+/** MFUL tearing-flag command (unsupported by I2C Plus). */
 #define AZ_NFC_CMD_CHECK_TEARING 0x3EU
-
-/** @brief Constant used for NFC cmd vcsl. */
+/** MFUL VCSL command (unsupported by I2C Plus). */
 #define AZ_NFC_CMD_VCSL 0x4BU
-
-/** @brief Constant used for NFC cmd auth. */
+/** Ultralight-C authentication command (unsupported by I2C Plus). */
 #define AZ_NFC_CMD_AUTH 0x1AU
-
-/** @brief Constant used for NFC ack. */
+/** Type-2 ACK nibble. */
 #define AZ_NFC_ACK 0x0AU
-
-/** @brief Constant used for NFC nak. */
+/** Type-2 NAK nibble. */
 #define AZ_NFC_NAK 0x00U
-
 /**
- * @brief Apply a standard Amiibo UID and ISO 14443-3A identity to tag data.
- * @param data Data buffer or tag state used by the operation.
- * @param raw_uid Nine-byte raw Amiibo UID buffer.
- * @return true on success; false if the operation cannot be completed.
+ * @brief Fill common ISO14443A identity fields from a generated raw UID.
+ * @param data Mutable Ultralight data model.
+ * @param raw_uid Nine-byte physical Amiibo UID representation.
+ * @return True when the firmware accepts the seven-byte RF UID.
  */
 static bool az_nfc_set_identity(MfUltralightData* data, const uint8_t raw_uid[9]) {
     uint8_t uid7[7];
@@ -107,14 +87,16 @@ static bool az_nfc_set_identity(MfUltralightData* data, const uint8_t raw_uid[9]
 }
 
 /**
- * @brief Apply a version-3 UID, identity bytes, password, and PACK to tag data.
- * @param data Data buffer or tag state used by the operation.
- * @param uid7 Seven-byte NFC UID buffer.
- * @return true on success; false if the operation cannot be completed.
+ * @brief Fill type-3 RF identity without applying NTAG215 BCC page rewriting.
+ * @param data Mutable I2C Plus model whose physical UID bytes are already in v3 layout.
+ * @param uid7 Seven-byte UID presented during ISO14443A anticollision.
+ * @return True when the firmware accepts the seven-byte UID.
  */
 static bool az_nfc_set_identity_v3(MfUltralightData* data, const uint8_t uid7[7]) {
     if(!data || !uid7 || !mf_ultralight_set_uid(data, uid7, 7U)) return false;
 
+    /* Match Flipper's native NTAG I2C generator: establish the normal MFUL ISO14443A
+     * identity first, then expose the I2C memory header with the seven UID bytes directly. */
     data->iso14443_3a_data->atqa[0] = 0x44;
     data->iso14443_3a_data->atqa[1] = 0x00;
     data->iso14443_3a_data->sak = 0x00;
@@ -123,6 +105,8 @@ static bool az_nfc_set_identity_v3(MfUltralightData* data, const uint8_t uid7[7]
     data->page[2].data[0] = data->iso14443_3a_data->atqa[0];
     data->page[2].data[1] = data->iso14443_3a_data->atqa[1];
 
+    /* PWD/PACK are unreadable over RF, so keep the real authentication values in the
+     * native config pages while the listener returns zeroes for reads of E5/E6. */
     uint8_t* password = data->page[229].data;
     password[0] = (uint8_t)(0xAAU ^ (uid7[1] ^ uid7[3]));
     password[1] = (uint8_t)(0x55U ^ (uid7[2] ^ uid7[4]));
@@ -136,8 +120,8 @@ static bool az_nfc_set_identity_v3(MfUltralightData* data, const uint8_t uid7[7]
 }
 
 /**
- * @brief Reset all Ultralight tearing flags to their default state.
- * @param data Data buffer or tag state used by the operation.
+ * @brief Initialize tearing flags to the value used by genuine/standard Amiibo tags.
+ * @param data Mutable Ultralight data model.
  */
 static void az_nfc_set_tearing_flags(MfUltralightData* data) {
     for(size_t i = 0; i < MF_ULTRALIGHT_TEARING_FLAG_NUM; i++) {
@@ -146,11 +130,11 @@ static void az_nfc_set_tearing_flags(MfUltralightData* data) {
 }
 
 /**
- * @brief Install a standard Amiibo dump into an NTAG215 memory image.
- * @param data Data buffer or tag state used by the operation.
- * @param dump Amiibo dump bytes.
- * @param raw_uid Nine-byte raw Amiibo UID buffer.
- * @return true on success; false if the operation cannot be completed.
+ * @brief Install one standard 532-byte encrypted dump into an NTAG215 model.
+ * @param data Mutable Ultralight data model.
+ * @param dump Encrypted standard Amiibo dump.
+ * @param raw_uid Raw UID used for password generation.
+ * @return True on success.
  */
 static bool az_nfc_install_standard(
     MfUltralightData* data,
@@ -168,6 +152,7 @@ static bool az_nfc_install_standard(
     memcpy(data->page, dump, AZ_DUMP_SIZE);
     if(!az_nfc_set_identity(data, raw_uid)) return false;
 
+    /* Flipper models the tearing flag separately from physical page RFUI. */
     data->page[130].data[3] = 0x00;
     az_nfc_set_tearing_flags(data);
 
@@ -180,9 +165,14 @@ static bool az_nfc_install_standard(
 }
 
 /**
- * @brief Expand standard Amiibo memory into the version-3 page layout.
- * @param standard Standard NTAG215 memory image.
- * @param data Data buffer or tag state used by the operation.
+ * @brief Expand a standard 540-byte Amiibo image into Flipper's native I2C Plus storage model.
+ * @param standard Source standard page image including PWD/PACK.
+ * @param data Mutable I2C Plus 2K model receiving rider/config/session data.
+ *
+ * Flipper intentionally compacts NTAG I2C Plus memory: sector-0 EEPROM pages 0-E9 stay at
+ * their numeric indices, session pages EC/ED live at indices 234/235, and all 256 pages of
+ * sector 1 live at indices 236-491.  Sector-0 SRAM F0-FF is therefore kept separately by
+ * Amiibo Zero and supplied by the custom listener from the selected lock-on payload.
  */
 static void az_nfc_expand_v3(
     const uint8_t standard[AZ_NTAG215_BYTES],
@@ -216,11 +206,11 @@ static void az_nfc_expand_v3(
 }
 
 /**
- * @brief Install a generated Amiibo dump into a version-3 tag memory image.
- * @param data Data buffer or tag state used by the operation.
- * @param dump Amiibo dump bytes.
- * @param uid7 Seven-byte NFC UID buffer.
- * @return true on success; false if the operation cannot be completed.
+ * @brief Install an encrypted rider dump into a type-3 I2C Plus 2K native model.
+ * @param data Mutable Ultralight data model.
+ * @param dump Type-3 encrypted Amiibo crypto image before the 0x40-byte layout expansion.
+ * @param uid7 Direct seven-byte RF UID used by the type-3 image.
+ * @return True on success. Lock-on SRAM is intentionally external to this native model.
  */
 static bool az_nfc_install_v3(
     MfUltralightData* data,
@@ -246,10 +236,10 @@ static bool az_nfc_install_v3(
 }
 
 /**
- * @brief Extract the standard Amiibo dump bytes from tag memory.
- * @param data Data buffer or tag state used by the operation.
- * @param out_dump Destination for the resulting Amiibo dump.
- * @return true on success; false if the operation cannot be completed.
+ * @brief Extract a standard encrypted 532-byte dump from either supported physical layout.
+ * @param data Source Ultralight data model.
+ * @param out_dump Destination standard encrypted dump.
+ * @return True for supported page geometry.
  */
 static bool az_nfc_extract_standard_dump(
     const MfUltralightData* data,
@@ -272,11 +262,7 @@ static bool az_nfc_extract_standard_dump(
 }
 
 /**
- * @brief Populate an NFC device with a newly generated Amiibo tag image.
- * @param device NFC device to inspect or modify.
- * @param figure Figure metadata.
- * @param keys Loaded Amiibo key material.
- * @return true on success; false if the operation cannot be completed.
+ * @brief Generate fresh standard or type-3 Amiibo data and install it into a Flipper device model.
  */
 bool az_nfc_generate_device(NfcDevice* device, const AzFigure* figure, const AzKeys* keys) {
     if(!device || !figure || !keys || !keys->valid) return false;
@@ -302,9 +288,7 @@ bool az_nfc_generate_device(NfcDevice* device, const AzFigure* figure, const AzK
 }
 
 /**
- * @brief Determine whether an NFC device contains the version-3 tag layout.
- * @param device NFC device to inspect or modify.
- * @return true when the tested condition is satisfied; false otherwise.
+ * @brief Return whether a native device uses the supported type-3 geometry.
  */
 bool az_nfc_device_is_v3(const NfcDevice* device) {
     if(!az_nfc_validate_amiibo(device)) return false;
@@ -313,57 +297,45 @@ bool az_nfc_device_is_v3(const NfcDevice* device) {
     return data && data->type == MfUltralightTypeNTAGI2CPlus2K;
 }
 
-/** @brief Constant used for version-3 maximum response bytes. */
+/** Maximum standard-frame payload emitted by Flipper's MFUL listener. */
 #define AZ_V3_MAX_RESPONSE_BYTES 256U
-
-/** @brief Constant used for version-3 tx capacity. */
+/** Maximum transmitted bytes after appending CRC-A to a standard response. */
 #define AZ_V3_TX_CAPACITY (AZ_V3_MAX_RESPONSE_BYTES + 2U)
-
-/** @brief Constant used for version-3 dynamic lock page. */
+/** First NTAG I2C Plus dynamic-lock page in sector 0. */
 #define AZ_V3_DYNAMIC_LOCK_PAGE 0xE2U
-
-/** @brief Constant used for version-3 config page. */
+/** First NTAG I2C Plus configuration page in sector 0. */
 #define AZ_V3_CONFIG_PAGE 0xE3U
-
-/** @brief Constant used for version-3 pwd page. */
+/** Hidden PWD page in sector 0. */
 #define AZ_V3_PWD_PAGE 0xE5U
-
-/** @brief Constant used for version-3 pack page. */
+/** Hidden PACK page in sector 0. */
 #define AZ_V3_PACK_PAGE 0xE6U
-
-/** @brief Constant used for version-3 session page. */
+/** First session-register page in sector 0. */
 #define AZ_V3_SESSION_PAGE 0xECU
-
-/** @brief Constant used for version-3 ns reg page. */
+/** NS_REG session page in sector 0. */
 #define AZ_V3_NS_REG_PAGE 0xEDU
-
-/** @brief Constant used for version-3 SRAM first page. */
+/** First SRAM page in sector 0. */
 #define AZ_V3_SRAM_FIRST_PAGE 0xF0U
-
-/** @brief Constant used for version-3 SRAM last page. */
+/** Last SRAM page in sector 0. */
 #define AZ_V3_SRAM_LAST_PAGE 0xFFU
-
-/** @brief Constant used for version-3 mirror session page. */
+/** Mirrored session-register page in sector 3. */
 #define AZ_V3_MIRROR_SESSION_PAGE 0xF8U
-
-/** @brief Constant used for version-3 mirror ns reg page. */
+/** Mirrored NS_REG page in sector 3. */
 #define AZ_V3_MIRROR_NS_REG_PAGE 0xF9U
 
-/** @brief Internal outcome of a version-3 NFC command before listener post-processing. */
+/**
+ * @brief Internal result matching Flipper's MfUltralightCommand post-processing states.
+ */
 typedef enum {
-    AzV3CommandNotFound, /**< Received command is not handled by the version-3 dispatcher. */
-    AzV3CommandProcessed, /**< Command completed with a normal response. */
-    AzV3CommandProcessedAck, /**< Command completed and requires an ACK response. */
-    AzV3CommandProcessedSilent, /**< Command completed without transmitting a response. */
-    AzV3CommandNotProcessedNak, /**< Command was rejected with a generic NAK. */
-    AzV3CommandNotProcessedAuthNak, /**< Command was rejected because authentication requirements were not met. */
+    AzV3CommandNotFound,
+    AzV3CommandProcessed,
+    AzV3CommandProcessedAck,
+    AzV3CommandProcessedSilent,
+    AzV3CommandNotProcessedNak,
+    AzV3CommandNotProcessedAuthNak,
 } AzV3CommandResult;
 
 /**
- * @brief Calculate the ISO 14443-A CRC for an NFC response.
- * @param data Data buffer or tag state used by the operation.
- * @param length Number of bytes to process.
- * @return The calculated ISO 14443-A CRC value.
+ * @brief Compute ISO14443A CRC-A for standard response frames.
  */
 static uint16_t az_crc_a(const uint8_t* data, size_t length) {
     uint16_t crc = 0x6363U;
@@ -377,11 +349,10 @@ static uint16_t az_crc_a(const uint8_t* data, size_t length) {
 }
 
 /**
- * @brief Transmit a version-3 response with an appended ISO 14443-A CRC.
- * @param app Application state.
- * @param data Data buffer or tag state used by the operation.
- * @param size Number of bytes in the supplied buffer or file.
- * @return true on success; false if the operation cannot be completed.
+ * @brief Send a normal Type-2 response using Flipper's standard-frame wire format.
+ *
+ * The stock MfUltralight listener appends CRC-A before handing the frame to the ISO14443A
+ * transport. Amiibo Zero uses the public raw transport here, so it performs that append itself.
  */
 static bool az_v3_send_standard(AmiiboZeroApp* app, const uint8_t* data, size_t size) {
     if(!app || !app->v3_tx_buffer || !data || size > AZ_V3_MAX_RESPONSE_BYTES) return false;
@@ -394,10 +365,7 @@ static bool az_v3_send_standard(AmiiboZeroApp* app, const uint8_t* data, size_t 
 }
 
 /**
- * @brief Transmit a one-byte version-3 ACK or NAK response.
- * @param app Application state.
- * @param value Value to process or transmit.
- * @return true on success; false if the operation cannot be completed.
+ * @brief Send Flipper's four-bit MFUL ACK/NAK response.
  */
 static bool az_v3_send_short(AmiiboZeroApp* app, uint8_t value) {
     if(!app || !app->v3_tx_buffer) return false;
@@ -407,9 +375,7 @@ static bool az_v3_send_short(AmiiboZeroApp* app, uint8_t value) {
 }
 
 /**
- * @brief Return mutable Ultralight data for the current emulated NFC device.
- * @param app Application state.
- * @return Pointer to the requested object, or NULL when it is not available.
+ * @brief Return the mutable native I2C Plus data model used by the custom v3 listener.
  */
 static MfUltralightData* az_v3_data(AmiiboZeroApp* app) {
     if(!app || !app->nfc_device) return NULL;
@@ -417,10 +383,7 @@ static MfUltralightData* az_v3_data(AmiiboZeroApp* app) {
 }
 
 /**
- * @brief Check whether a version-3 page index is addressable.
- * @param app Application state.
- * @param page Logical tag page number.
- * @return true when the tested condition is satisfied; false otherwise.
+ * @brief Match Flipper's I2C page-validity rules, with the real SRAM window added.
  */
 static bool az_v3_page_valid(const AmiiboZeroApp* app, uint16_t page) {
     if(!app) return false;
@@ -440,11 +403,7 @@ static bool az_v3_page_valid(const AmiiboZeroApp* app, uint16_t page) {
 }
 
 /**
- * @brief Check whether a version-3 inclusive page range is addressable.
- * @param app Application state.
- * @param start_page First logical page in the requested range.
- * @param end_page Last logical page in the requested range.
- * @return true when the tested condition is satisfied; false otherwise.
+ * @brief Match Flipper's FAST_READ range validation, extended for sector-0 SRAM.
  */
 static bool az_v3_range_valid(const AmiiboZeroApp* app, uint16_t start_page, uint16_t end_page) {
     if(!app) return false;
@@ -458,7 +417,8 @@ static bool az_v3_range_valid(const AmiiboZeroApp* app, uint16_t start_page, uin
     case 2:
         return false;
     case 3:
-
+        /* Flipper's provider validates the starting mirrored session page and zero-fills
+         * any following invalid pages through its per-page read path. */
         return start_page >= AZ_V3_MIRROR_SESSION_PAGE &&
                start_page <= AZ_V3_MIRROR_NS_REG_PAGE;
     default:
@@ -467,11 +427,7 @@ static bool az_v3_range_valid(const AmiiboZeroApp* app, uint16_t start_page, uin
 }
 
 /**
- * @brief Translate a version-3 logical page to the backing Ultralight page.
- * @param app Application state.
- * @param page Logical tag page number.
- * @param native_page Destination for the translated backing-page number.
- * @return true on success; false if the operation cannot be completed.
+ * @brief Map one logical RF page to Flipper's compact native I2C Plus page array.
  */
 static bool az_v3_native_page(const AmiiboZeroApp* app, uint16_t page, uint16_t* native_page) {
     if(!app || !native_page || !az_v3_page_valid(app, page)) return false;
@@ -490,7 +446,7 @@ static bool az_v3_native_page(const AmiiboZeroApp* app, uint16_t page, uint16_t*
             *native_page = 235U;
             return true;
         }
-        return false;
+        return false; /* F0-FF is the external SRAM window. */
     case 1:
         *native_page = (uint16_t)(236U + page);
         return true;
@@ -503,10 +459,7 @@ static bool az_v3_native_page(const AmiiboZeroApp* app, uint16_t page, uint16_t*
 }
 
 /**
- * @brief Determine whether a logical page targets the version-3 NS register window.
- * @param app Application state.
- * @param page Logical tag page number.
- * @return true when the tested condition is satisfied; false otherwise.
+ * @brief Return true when one RF page names NS_REG in either mapped location.
  */
 static bool az_v3_is_ns_reg(const AmiiboZeroApp* app, uint16_t page) {
     return app && ((app->v3_sector == 0 && page == AZ_V3_NS_REG_PAGE) ||
@@ -514,11 +467,7 @@ static bool az_v3_is_ns_reg(const AmiiboZeroApp* app, uint16_t page) {
 }
 
 /**
- * @brief Read one logical version-3 page into a four-byte output buffer.
- * @param app Application state.
- * @param data Data buffer or tag state used by the operation.
- * @param page Logical tag page number.
- * @param out Destination for the computed result.
+ * @brief Read one logical page with Flipper's hidden-PWD/PACK and invalid-page behavior.
  */
 static void az_v3_read_page(
     AmiiboZeroApp* app,
@@ -534,6 +483,7 @@ static void az_v3_read_page(
         return;
     }
 
+    /* Stock MFUL hides the PWD/PACK page numbers before applying I2C sector mapping. */
     if(page == AZ_V3_PWD_PAGE || page == AZ_V3_PACK_PAGE) return;
 
     uint16_t native_page = 0;
@@ -549,12 +499,7 @@ static void az_v3_read_page(
 }
 
 /**
- * @brief Check version-3 read or write access against authentication settings.
- * @param app Application state.
- * @param data Data buffer or tag state used by the operation.
- * @param start_page First logical page in the requested range.
- * @param write_op Whether the access check is for a write operation.
- * @return true when the tested condition is satisfied; false otherwise.
+ * @brief Apply Flipper's password-access rule for an I2C Plus page.
  */
 static bool az_v3_check_access(
     const AmiiboZeroApp* app,
@@ -569,7 +514,8 @@ static bool az_v3_check_access(
         return false;
     }
     if(config->access.cfglck && write_op) {
-
+        /* Match the stock listener's pages_total-4 check even though I2C Plus config lives
+         * in sector 0; genuine v3 config leaves CFGLCK clear. */
         const uint16_t config_page_start = (uint16_t)(data->pages_total - 4U);
         if(start_page == config_page_start || start_page == config_page_start + 1U) return false;
     }
@@ -577,10 +523,7 @@ static bool az_v3_check_access(
 }
 
 /**
- * @brief Check whether a page is protected by static lock bits.
- * @param data Data buffer or tag state used by the operation.
- * @param page Logical tag page number.
- * @return true on success; false if the operation cannot be completed.
+ * @brief Check Flipper's static lock bits for sector-0 pages 3-15.
  */
 static bool az_v3_static_page_locked(const MfUltralightData* data, uint16_t page) {
     if(!data || page < 3U || page > 15U) return false;
@@ -590,11 +533,7 @@ static bool az_v3_static_page_locked(const MfUltralightData* data, uint16_t page
 }
 
 /**
- * @brief Check whether a page is protected by dynamic lock bits.
- * @param data Data buffer or tag state used by the operation.
- * @param page Logical tag page number.
- * @param sector Logical sector number.
- * @return true on success; false if the operation cannot be completed.
+ * @brief Check the I2C Plus 2K dynamic lock map using Flipper's 32-page granularity.
  */
 static bool az_v3_dynamic_page_locked(
     const MfUltralightData* data,
@@ -610,9 +549,7 @@ static bool az_v3_dynamic_page_locked(
 }
 
 /**
- * @brief Apply one-way updates to the static lock bytes.
- * @param data Data buffer or tag state used by the operation.
- * @param payload Four-byte page or command payload.
+ * @brief Apply Flipper's one-way static lock update for page 2.
  */
 static void az_v3_write_static_locks(MfUltralightData* data, const uint8_t payload[4]) {
     uint16_t current = (uint16_t)data->page[2].data[2] |
@@ -628,9 +565,7 @@ static void az_v3_write_static_locks(MfUltralightData* data, const uint8_t paylo
 }
 
 /**
- * @brief Apply one-way updates to the dynamic lock bytes.
- * @param data Data buffer or tag state used by the operation.
- * @param payload Four-byte page or command payload.
+ * @brief Apply Flipper's one-way 24-bit dynamic lock update.
  */
 static void az_v3_write_dynamic_locks(MfUltralightData* data, const uint8_t payload[4]) {
     uint32_t current = (uint32_t)data->page[AZ_V3_DYNAMIC_LOCK_PAGE].data[0] |
@@ -654,12 +589,7 @@ static void az_v3_write_dynamic_locks(MfUltralightData* data, const uint8_t payl
 }
 
 /**
- * @brief Apply a version-3 page write while enforcing lock and register behavior.
- * @param app Application state.
- * @param data Data buffer or tag state used by the operation.
- * @param page Logical tag page number.
- * @param payload Four-byte page or command payload.
- * @return The computed result value.
+ * @brief Perform a WRITE using the same ordering as Flipper's MFUL listener.
  */
 static AzV3CommandResult az_v3_write_page(
     AmiiboZeroApp* app,
@@ -687,7 +617,8 @@ static AzV3CommandResult az_v3_write_page(
         return AzV3CommandProcessedAck;
     }
     if(app->v3_sector == 0 && page >= AZ_V3_SRAM_FIRST_PAGE && page <= AZ_V3_SRAM_LAST_PAGE) {
-
+        /* The Switch uses FAST_WRITE for the mailbox request. Preserve the selected precomputed
+         * response rather than allowing an incidental Type-2 WRITE to destroy it. */
         return AzV3CommandProcessedAck;
     }
 
@@ -700,11 +631,7 @@ static AzV3CommandResult az_v3_write_page(
 }
 
 /**
- * @brief Determine whether configured authentication blocks the current operation.
- * @param data Data buffer or tag state used by the operation.
- * @param config Ultralight configuration-page state.
- * @param auth_success Whether authentication has succeeded for the current interaction.
- * @return true on success; false if the operation cannot be completed.
+ * @brief Update I2C Plus authentication-attempt state using Flipper's rules.
  */
 static bool az_v3_auth_locked(
     MfUltralightData* data,
@@ -721,12 +648,7 @@ static bool az_v3_auth_locked(
 }
 
 /**
- * @brief Decode and execute one received version-3 NFC command.
- * @param app Application state.
- * @param data Data buffer or tag state used by the operation.
- * @param rx Received NFC command bytes.
- * @param size Number of bytes in the supplied buffer or file.
- * @return The computed result value.
+ * @brief Dispatch one complete MFUL command with Flipper-compatible lengths and outcomes.
  */
 static AzV3CommandResult az_v3_dispatch_command(
     AmiiboZeroApp* app,
@@ -786,7 +708,9 @@ static AzV3CommandResult az_v3_dispatch_command(
         if(rx[1] != AZ_V3_SRAM_FIRST_PAGE || rx[2] != AZ_V3_SRAM_LAST_PAGE) {
             return AzV3CommandNotProcessedNak;
         }
-
+        /* Flipper's I2C Plus handler ACKs F0-FF but has no SRAM model. Add the amiibo mailbox
+         * on top: the request bytes are not persisted, and the selected lock-on response becomes
+         * available immediately to RF reads with NS_REG.SRAM_RF_READY asserted. */
         app->v3_sram_ready = true;
         return AzV3CommandProcessedAck;
 
@@ -817,6 +741,8 @@ static AzV3CommandResult az_v3_dispatch_command(
         app->v3_sector_select_pending = true;
         return AzV3CommandProcessedAck;
 
+    /* Keep the same wire/state outcome as Flipper's command table even for features that
+     * NTAG I2C Plus 2K does not enable. This matters to generic Type-2 tag probes. */
     case AZ_NFC_CMD_COMP_WRITE:
         if(size != 2U) return AzV3CommandNotFound;
         return AzV3CommandProcessedSilent;
@@ -842,10 +768,7 @@ static AzV3CommandResult az_v3_dispatch_command(
 }
 
 /**
- * @brief Convert a version-3 command result into listener control flow and output.
- * @param app Application state.
- * @param result Internal version-3 command result.
- * @return The computed result value.
+ * @brief Apply Flipper's MFUL command post-processing semantics.
  */
 static NfcCommand az_v3_postprocess(AmiiboZeroApp* app, AzV3CommandResult result) {
     if(result == AzV3CommandProcessedAck) {
@@ -861,13 +784,13 @@ static NfcCommand az_v3_postprocess(AmiiboZeroApp* app, AzV3CommandResult result
     else if(result == AzV3CommandNotProcessedAuthNak)
         az_v3_send_short(app, 0x04U);
 
+    /* Stock MfUltralightListener sleeps after unsupported/malformed commands rather than merely
+     * resetting RX. Readers depend on this state transition during tag probing. */
     return NfcCommandSleep;
 }
 
 /**
- * @brief Reset version-3 transient listener state for a new interaction.
- * @param app Application state.
- * @return The computed result value.
+ * @brief Reset the same volatile MFUL state that Flipper clears on raw data, HALT, or field loss.
  */
 static NfcCommand az_v3_reset_listener_state(AmiiboZeroApp* app) {
     app->v3_sector_select_pending = false;
@@ -878,10 +801,7 @@ static NfcCommand az_v3_reset_listener_state(AmiiboZeroApp* app) {
 }
 
 /**
- * @brief Handle NFC listener events for version-3 emulation.
- * @param event NFC event to handle.
- * @param context Caller-owned callback context.
- * @return The computed result value.
+ * @brief ISO14443A callback implementing Flipper's MFUL listener state machine plus I2C SRAM.
  */
 static NfcCommand az_v3_listener_callback(NfcGenericEvent event, void* context) {
     AmiiboZeroApp* app = context;
@@ -911,9 +831,7 @@ static NfcCommand az_v3_listener_callback(NfcGenericEvent event, void* context) 
 }
 
 /**
- * @brief Start NFC emulation for the application's current device.
- * @param app Application state.
- * @return true on success; false if the operation cannot be completed.
+ * @brief Start stock MFUL emulation for v1/v2 or the stock-derived I2C Plus listener for v3.
  */
 bool az_nfc_listener_start(AmiiboZeroApp* app) {
     if(!app || app->emulating || app->listener || app->v3_i2c_listener) return false;
@@ -954,9 +872,7 @@ bool az_nfc_listener_start(AmiiboZeroApp* app) {
 }
 
 /**
- * @brief Stop active emulation and synchronize mutable tag state back to the device.
- * @param app Application state.
- * @return true on success; false if the operation cannot be completed.
+ * @brief Stop either emulation backend while retaining writes made directly to nfc_device.
  */
 bool az_nfc_listener_pause_and_sync(AmiiboZeroApp* app) {
     if(!app || !app->emulating || !app->listener) return false;
@@ -986,10 +902,7 @@ bool az_nfc_listener_pause_and_sync(AmiiboZeroApp* app) {
 }
 
 /**
- * @brief Replace the UID of the current Amiibo image while preserving encrypted content.
- * @param device NFC device to inspect or modify.
- * @param keys Loaded Amiibo key material.
- * @return true on success; false if the operation cannot be completed.
+ * @brief Randomize a device UID by authenticating/decrypting the existing state and re-encrypting it.
  */
 bool az_nfc_randomize_uid(NfcDevice* device, const AzKeys* keys) {
     if(!device || !keys || !keys->valid || !az_nfc_validate_amiibo(device)) return false;
@@ -1026,11 +939,11 @@ bool az_nfc_randomize_uid(NfcDevice* device, const AzKeys* keys) {
 }
 
 /**
- * @brief Convert big-endian UTF-16 code units into a bounded UTF-8 string.
- * @param source Source object or buffer.
- * @param code_units Number of UTF-16 code units to decode.
- * @param out Destination for the computed result.
- * @param out_size Destination for the resulting size.
+ * @brief Convert one UTF-16BE field into bounded UTF-8 for display.
+ * @param source UTF-16BE source bytes.
+ * @param code_units Maximum 16-bit code units to decode.
+ * @param out Destination UTF-8 buffer.
+ * @param out_size Destination capacity.
  */
 static void az_utf16be_to_utf8(
     const uint8_t* source,
@@ -1062,10 +975,10 @@ static void az_utf16be_to_utf8(
 }
 
 /**
- * @brief Format a packed Amiibo date field for display.
- * @param bytes Input byte sequence.
- * @param out Destination for the computed result.
- * @param out_size Destination for the resulting size.
+ * @brief Format Nintendo's packed Amiibo date into YYYY-MM-DD.
+ * @param bytes Two-byte big-endian packed date.
+ * @param out Destination text buffer.
+ * @param out_size Destination capacity.
  */
 static void az_format_amiibo_date(const uint8_t bytes[2], char* out, size_t out_size) {
     uint16_t value = (uint16_t)(((uint16_t)bytes[0] << 8) | bytes[1]);
@@ -1080,9 +993,9 @@ static void az_format_amiibo_date(const uint8_t bytes[2], char* out, size_t out_
 }
 
 /**
- * @brief Read an unsigned 64-bit big-endian integer.
- * @param bytes Input byte sequence.
- * @return The decoded unsigned 64-bit value.
+ * @brief Read one big-endian 64-bit value without alignment assumptions.
+ * @param bytes Eight source bytes.
+ * @return Decoded value.
  */
 static uint64_t az_read_be64(const uint8_t bytes[8]) {
     uint64_t value = 0;
@@ -1091,11 +1004,7 @@ static uint64_t az_read_be64(const uint8_t bytes[8]) {
 }
 
 /**
- * @brief Decode user-facing Amiibo metadata from an NFC device.
- * @param device NFC device to inspect or modify.
- * @param keys Loaded Amiibo key material.
- * @param out Destination for the computed result.
- * @return true on success; false if the operation cannot be completed.
+ * @brief Decode authenticated Amiibo metadata from a standard or type-3 device image.
  */
 bool az_nfc_read_details(const NfcDevice* device, const AzKeys* keys, AzAmiiboDetails* out) {
     if(!out) return false;
@@ -1109,6 +1018,10 @@ bool az_nfc_read_details(const NfcDevice* device, const AzKeys* keys, AzAmiiboDe
         return false;
     }
 
+    /* az_decrypt_dump() keeps the physical tag byte layout.  The commonly
+     * documented decrypted "internal" Amiibo structure relocates physical
+     * ranges before decryption, so its offsets cannot be used directly here.
+     * These offsets are the equivalent fields in the physical 532-byte image. */
     out->available = true;
     out->initialized = (plain[0x14] & 0x10U) != 0;
     out->app_data_initialized = (plain[0x14] & 0x20U) != 0;
@@ -1131,9 +1044,7 @@ bool az_nfc_read_details(const NfcDevice* device, const AzKeys* keys, AzAmiiboDe
 }
 
 /**
- * @brief Check whether an NFC device has a supported Amiibo memory layout.
- * @param device NFC device to inspect or modify.
- * @return true when the tested condition is satisfied; false otherwise.
+ * @brief Validate that NFC device data has supported standard or type-3 Amiibo geometry.
  */
 bool az_nfc_validate_amiibo(const NfcDevice* device) {
     if(!device || nfc_device_get_protocol(device) != NfcProtocolMfUltralight) return false;
@@ -1146,10 +1057,7 @@ bool az_nfc_validate_amiibo(const NfcDevice* device) {
 }
 
 /**
- * @brief Extract the Amiibo figure identifier from an NFC device.
- * @param device NFC device to inspect or modify.
- * @param out_id Destination for the resulting id.
- * @return true on success; false if the operation cannot be completed.
+ * @brief Extract the eight-byte figure ID from either supported Amiibo device layout.
  */
 bool az_nfc_extract_figure_id(const NfcDevice* device, uint8_t out_id[8]) {
     if(!out_id || !az_nfc_validate_amiibo(device)) return false;
@@ -1161,22 +1069,565 @@ bool az_nfc_extract_figure_id(const NfcDevice* device, uint8_t out_id[8]) {
 }
 
 /**
- * @brief Persist an NFC device image to a file path.
- * @param device NFC device to inspect or modify.
- * @param path Filesystem path.
- * @return true on success; false if the operation cannot be completed.
+ * @brief Persist NFC device data to a native Flipper .nfc file.
  */
 bool az_nfc_save_device(NfcDevice* device, const char* path) {
     return device && path && nfc_device_save(device, path);
 }
 
 /**
- * @brief Load an NFC device image from a file path.
- * @param device NFC device to inspect or modify.
- * @param path Filesystem path.
- * @return true on success; false if the operation cannot be completed.
+ * @brief Load and validate NFC device data from a native Flipper .nfc file.
  */
 bool az_nfc_load_device(NfcDevice* device, const char* path) {
     if(!device || !path || !nfc_device_load(device, path)) return false;
     return az_nfc_validate_amiibo(device);
+}
+
+/**
+ * @brief Export only the standard v2 NTAG215 encrypted image.
+ */
+bool az_nfc_export_v2_dump(const NfcDevice* device, uint8_t out_dump[AZ_DUMP_SIZE]) {
+    if(!device || !out_dump || nfc_device_get_protocol(device) != NfcProtocolMfUltralight) {
+        return false;
+    }
+    const MfUltralightData* data =
+        (const MfUltralightData*)nfc_device_get_data(device, NfcProtocolMfUltralight);
+    if(!data || data->type != MfUltralightTypeNTAG215 || data->pages_total < 133U) return false;
+    memcpy(out_dump, data->page, AZ_DUMP_SIZE);
+    return true;
+}
+
+/** Exact NXP/Flipper version tuple constraints needed to call a target NTAG215. */
+static bool az_tag_version_is_ntag215(MfUltralightVersion* version) {
+    if(!version) return false;
+    return version->vendor_id == 0x04U && version->prod_type == 0x04U &&
+           version->storage_size == 0x11U &&
+           mf_ultralight_get_type_by_version(version) == MfUltralightTypeNTAG215;
+}
+
+/** Store one callback result and stop the current NFC phase. */
+static NfcCommand az_tag_phase_finish(AmiiboZeroApp* app, AzTagResult result) {
+    if(app) {
+        app->tag_result = result;
+        app->tag_phase_done = true;
+    }
+    return NfcCommandStop;
+}
+
+/** Write one physical NTAG page and translate the result to a boolean. */
+static bool az_tag_write_page(
+    MfUltralightPoller* poller,
+    uint8_t page_num,
+    const uint8_t page_bytes[4]) {
+    MfUltralightPage page;
+    memcpy(page.data, page_bytes, sizeof(page.data));
+    return mf_ultralight_poller_write_page(poller, page_num, &page) == MfUltralightErrorNone;
+}
+
+/** Authenticate a retail-style Amiibo using the password derived from its physical UID. */
+static bool az_tag_authenticate(MfUltralightPoller* poller, const uint8_t raw_uid[9]) {
+    MfUltralightPollerAuthContext auth;
+    memset(&auth, 0, sizeof(auth));
+    az_tag_password(raw_uid, auth.password.data);
+    if(mf_ultralight_poller_auth_pwd(poller, &auth) != MfUltralightErrorNone) return false;
+    return auth.pack.data[0] == 0x80U && auth.pack.data[1] == 0x80U;
+}
+
+/**
+ * @brief Validate a blank physical NTAG215 and capture its exact raw UID.
+ *
+ * Static and dynamic lock bits must still be zero. AUTH0 must retain the factory-disabled
+ * value so a previously configured/partially programmed tag cannot be mistaken for blank.
+ */
+static AzTagResult az_tag_scan_blank(
+    AmiiboZeroApp* app,
+    MfUltralightPoller* poller,
+    uint8_t raw_uid[9],
+    uint8_t page2_prefix[2]) {
+    UNUSED(app);
+    MfUltralightVersion version;
+    if(mf_ultralight_poller_read_version(poller, &version) != MfUltralightErrorNone) {
+        return AzTagResultReadFailed;
+    }
+    if(!az_tag_version_is_ntag215(&version)) return AzTagResultWrongTag;
+
+    MfUltralightPageReadCommandData head;
+    if(mf_ultralight_poller_read_page(poller, 0U, &head) != MfUltralightErrorNone) {
+        return AzTagResultReadFailed;
+    }
+    const uint8_t* first = (const uint8_t*)head.page;
+    memcpy(raw_uid, first, 9U);
+    if(page2_prefix) memcpy(page2_prefix, head.page[2].data, 2U);
+
+    MfUltralightPageReadCommandData tail;
+    if(mf_ultralight_poller_read_page(poller, 130U, &tail) != MfUltralightErrorNone) {
+        return AzTagResultReadFailed;
+    }
+
+    const bool static_locked = head.page[2].data[2] != 0U || head.page[2].data[3] != 0U;
+    const bool dynamic_locked = tail.page[0].data[0] != 0U || tail.page[0].data[1] != 0U ||
+                                tail.page[0].data[2] != 0U;
+    const bool configured = tail.page[1].data[3] != 0xFFU;
+    if(static_locked || dynamic_locked || configured) return AzTagResultNotBlank;
+    return AzTagResultSuccess;
+}
+
+/** Program all ordinary Amiibo pages first and irreversible lock bits last. */
+static AzTagResult az_tag_program_blank(AmiiboZeroApp* app, MfUltralightPoller* poller) {
+    uint8_t live_uid[9];
+    uint8_t page2_prefix[2];
+    AzTagResult scan = az_tag_scan_blank(app, poller, live_uid, page2_prefix);
+    if(scan != AzTagResultSuccess) return scan;
+    if(memcmp(live_uid, app->tag_target_uid, sizeof(live_uid)) != 0) {
+        return AzTagResultUidChanged;
+    }
+    if(!app->tag_work_dump) return AzTagResultCryptoFailed;
+
+    const uint8_t* dump = app->tag_work_dump;
+    const uint16_t total_steps = 127U + 4U + 2U; /* pages 3-129, PACK/PWD/config x2, locks x2 */
+    uint16_t done = 0U;
+
+    for(uint16_t page = 3U; page <= 129U; page++) {
+        if(!az_tag_write_page(poller, (uint8_t)page, dump + page * 4U)) {
+            return AzTagResultWriteFailed;
+        }
+        done++;
+        app->tag_progress = (uint8_t)((done * 100U) / total_steps);
+    }
+
+    static const uint8_t pack[4] = {0x80U, 0x80U, 0x00U, 0x00U};
+    if(!az_tag_write_page(poller, 134U, pack)) return AzTagResultWriteFailed;
+    done++;
+
+    uint8_t password[4];
+    az_tag_password(app->tag_target_uid, password);
+    if(!az_tag_write_page(poller, 133U, password)) return AzTagResultWriteFailed;
+    done++;
+
+    /* Program AUTH0 before ACCESS/CFGLCK. Once AUTH0 takes effect, authenticate before
+     * writing ACCESS so the final config page can safely set CFGLCK. */
+    if(!az_tag_write_page(poller, 131U, dump + 131U * 4U)) return AzTagResultWriteFailed;
+    done++;
+    if(!az_tag_authenticate(poller, app->tag_target_uid)) return AzTagResultAuthFailed;
+    if(!az_tag_write_page(poller, 132U, dump + 132U * 4U)) return AzTagResultWriteFailed;
+    done++;
+
+    /* Irreversible static and dynamic lock bits are deliberately the final two writes.
+     * Preserve the destination tag's manufacturer/BCC bytes in page 2. */
+    uint8_t static_lock[4] = {page2_prefix[0], page2_prefix[1], 0x0FU, 0xE0U};
+    if(!az_tag_write_page(poller, 2U, static_lock)) return AzTagResultWriteFailed;
+    done++;
+    static const uint8_t dynamic_lock[4] = {0x01U, 0x00U, 0x0FU, 0x00U};
+    if(!az_tag_write_page(poller, 130U, dynamic_lock)) return AzTagResultWriteFailed;
+    done++;
+    app->tag_progress = 100U;
+    return AzTagResultSuccess;
+}
+
+/** Rewrite only the permanently-unlocked Amiibo state pages on an existing retail-style tag. */
+static AzTagResult az_tag_program_clear(AmiiboZeroApp* app, MfUltralightPoller* poller) {
+    MfUltralightVersion version;
+    if(mf_ultralight_poller_read_version(poller, &version) != MfUltralightErrorNone) {
+        return AzTagResultReadFailed;
+    }
+    if(!az_tag_version_is_ntag215(&version)) return AzTagResultWrongTag;
+
+    MfUltralightPageReadCommandData head;
+    if(mf_ultralight_poller_read_page(poller, 0U, &head) != MfUltralightErrorNone) {
+        return AzTagResultReadFailed;
+    }
+    uint8_t live_uid[9];
+    memcpy(live_uid, head.page, sizeof(live_uid));
+    if(memcmp(live_uid, app->tag_target_uid, sizeof(live_uid)) != 0) {
+        return AzTagResultUidChanged;
+    }
+    if(!az_tag_authenticate(poller, live_uid)) return AzTagResultAuthFailed;
+    if(!app->tag_work_dump) return AzTagResultCryptoFailed;
+
+    const uint16_t total_steps = 9U + 98U; /* pages 4-12 plus 32-129 */
+    uint16_t done = 0U;
+    for(uint16_t page = 4U; page <= 12U; page++) {
+        if(!az_tag_write_page(poller, (uint8_t)page, app->tag_work_dump + page * 4U)) {
+            return AzTagResultWriteFailed;
+        }
+        done++;
+        app->tag_progress = (uint8_t)((done * 100U) / total_steps);
+    }
+    for(uint16_t page = 32U; page <= 129U; page++) {
+        if(!az_tag_write_page(poller, (uint8_t)page, app->tag_work_dump + page * 4U)) {
+            return AzTagResultWriteFailed;
+        }
+        done++;
+        app->tag_progress = (uint8_t)((done * 100U) / total_steps);
+    }
+    app->tag_progress = 100U;
+    return AzTagResultSuccess;
+}
+
+static AzTagResult az_tag_read_amiibo(AmiiboZeroApp* app, MfUltralightPoller* poller);
+
+/** Extended poller callback used for blank validation, direct read, ordered write, and clear-write phases. */
+static NfcCommand az_tag_extended_callback(NfcGenericEventEx event, void* context) {
+    AmiiboZeroApp* app = context;
+    if(!app || !event.poller || !event.parent_event_data) return NfcCommandStop;
+    Iso14443_3aPollerEvent* iso_event = event.parent_event_data;
+    if(iso_event->type == Iso14443_3aPollerEventTypeError) {
+        if(iso_event->data && iso_event->data->error == Iso14443_3aErrorNotPresent) {
+            return NfcCommandContinue;
+        }
+        return az_tag_phase_finish(app, AzTagResultReadFailed);
+    }
+    if(iso_event->type != Iso14443_3aPollerEventTypeReady) return NfcCommandContinue;
+
+    MfUltralightPoller* poller = event.poller;
+    if(app->tag_stage == AzTagStageScanBlank) {
+        uint8_t uid[9];
+        AzTagResult result = az_tag_scan_blank(app, poller, uid, NULL);
+        if(result == AzTagResultSuccess) memcpy(app->tag_target_uid, uid, sizeof(uid));
+        return az_tag_phase_finish(app, result);
+    }
+    if(app->tag_stage == AzTagStageReading) {
+        return az_tag_phase_finish(app, az_tag_read_amiibo(app, poller));
+    }
+    if(app->tag_stage == AzTagStageWriting) {
+        return az_tag_phase_finish(app, az_tag_program_blank(app, poller));
+    }
+    if(app->tag_stage == AzTagStageClearing) {
+        return az_tag_phase_finish(app, az_tag_program_clear(app, poller));
+    }
+    return az_tag_phase_finish(app, AzTagResultReadFailed);
+}
+
+/**
+ * @brief Read the complete Amiibo-relevant NTAG215 page image without running Flipper's
+ *        generic MFUL discovery extras.
+ *
+ * The stock MFUL reader probes READ_SIG, counters, tearing flags, and default passwords as part
+ * of a general-purpose Ultralight scan. Amiibo physical-tag operations only need the NTAG215
+ * version, live UID, authenticated pages 0-132, and the known Amiibo PWD/PACK values. Reading
+ * those directly also avoids turning an unrelated READ_SIG failure into "Tag read failed".
+ */
+static AzTagResult az_tag_read_amiibo(AmiiboZeroApp* app, MfUltralightPoller* poller) {
+    if(!app || !poller || !app->tag_poller) return AzTagResultReadFailed;
+
+    MfUltralightVersion version;
+    memset(&version, 0, sizeof(version));
+    if(mf_ultralight_poller_read_version(poller, &version) != MfUltralightErrorNone) {
+        return AzTagResultReadFailed;
+    }
+    if(!az_tag_version_is_ntag215(&version)) return AzTagResultWrongTag;
+
+    MfUltralightPageReadCommandData head;
+    memset(&head, 0, sizeof(head));
+    if(mf_ultralight_poller_read_page(poller, 0U, &head) != MfUltralightErrorNone) {
+        return AzTagResultReadFailed;
+    }
+
+    uint8_t raw_uid[9];
+    memcpy(raw_uid, head.page, sizeof(raw_uid));
+    if(!az_tag_authenticate(poller, raw_uid)) return AzTagResultAuthFailed;
+
+    MfUltralightData* data =
+        (MfUltralightData*)nfc_poller_get_data(app->tag_poller);
+    if(!data) return AzTagResultReadFailed;
+
+    memset(data->page, 0, sizeof(data->page));
+    memcpy(&data->version, &version, sizeof(version));
+    data->type = MfUltralightTypeNTAG215;
+    data->pages_total = 135U;
+    data->pages_read = 0U;
+    data->auth_attempts = 0U;
+    memset(&data->signature, 0, sizeof(data->signature));
+    memset(data->counter, 0, sizeof(data->counter));
+    az_nfc_set_tearing_flags(data);
+
+    memcpy(&data->page[0], head.page, sizeof(head.page));
+    data->pages_read = 4U;
+
+    /* Page reads return four pages at a time. Read aligned groups through page 131. */
+    for(uint16_t page = 4U; page <= 128U; page += 4U) {
+        MfUltralightPageReadCommandData block;
+        memset(&block, 0, sizeof(block));
+        if(mf_ultralight_poller_read_page(poller, (uint8_t)page, &block) !=
+           MfUltralightErrorNone) {
+            return AzTagResultReadFailed;
+        }
+        memcpy(&data->page[page], block.page, sizeof(block.page));
+        data->pages_read = (uint16_t)(page + 4U);
+        app->tag_progress = (uint8_t)((data->pages_read * 95U) / 133U);
+    }
+
+    /* READ 129 yields 129-132 without relying on end-of-memory rollover. */
+    MfUltralightPageReadCommandData config;
+    memset(&config, 0, sizeof(config));
+    if(mf_ultralight_poller_read_page(poller, 129U, &config) != MfUltralightErrorNone) {
+        return AzTagResultReadFailed;
+    }
+    data->page[132] = config.page[3];
+    data->pages_read = 133U;
+
+    /* PWD and PACK are not readable as ordinary memory. Reconstruct the values Amiibo uses. */
+    uint8_t password[4];
+    az_tag_password(raw_uid, password);
+    memcpy(data->page[133].data, password, sizeof(password));
+    static const uint8_t pack[4] = {0x80U, 0x80U, 0x00U, 0x00U};
+    memcpy(data->page[134].data, pack, sizeof(pack));
+
+    /* Preserve the originality signature when available, but never make this optional
+     * metadata a prerequisite for reading/saving or clearing a valid Amiibo. */
+    MfUltralightSignature signature;
+    memset(&signature, 0, sizeof(signature));
+    if(mf_ultralight_poller_read_signature(poller, &signature) == MfUltralightErrorNone) {
+        data->signature = signature;
+    }
+
+    /* The tail poller's ISO data is allocated with malloc and the normal MFUL state machine
+     * is deliberately bypassed, so initialize it before installing the live UID/ATQA/SAK. */
+    memset(data->iso14443_3a_data, 0, sizeof(*data->iso14443_3a_data));
+    if(!az_nfc_set_identity(data, raw_uid)) return AzTagResultReadFailed;
+
+    data->pages_read = 135U;
+    app->tag_progress = 100U;
+    return AzTagResultSuccess;
+}
+
+/** Allocate and start one physical-tag poller phase using direct MFUL commands. */
+static bool az_tag_start_poller(AmiiboZeroApp* app) {
+    if(!app || app->tag_poller) return false;
+    app->tag_phase_done = false;
+    app->tag_result = AzTagResultNone;
+    app->tag_poller = nfc_poller_alloc(app->nfc, NfcProtocolMfUltralight);
+    if(!app->tag_poller) return false;
+    nfc_poller_start_ex(app->tag_poller, az_tag_extended_callback, app);
+    return true;
+}
+
+/** Stop/free the poller after its callback returned NfcCommandStop. */
+static void az_tag_release_poller(AmiiboZeroApp* app) {
+    if(!app || !app->tag_poller) return;
+    nfc_poller_stop(app->tag_poller);
+    nfc_poller_free(app->tag_poller);
+    app->tag_poller = NULL;
+}
+
+/** Build the native saved representation for one just-read retail NTAG215. */
+static bool az_tag_save_read_device(AmiiboZeroApp* app, const MfUltralightData* read_data) {
+    if(!app || !read_data || read_data->type != MfUltralightTypeNTAG215 ||
+       read_data->pages_total < 133U || !app->keys.valid) {
+        return false;
+    }
+
+    MfUltralightData* data = (MfUltralightData*)read_data;
+
+    uint8_t raw_uid[9];
+    memcpy(raw_uid, data->page, sizeof(raw_uid));
+    uint8_t password[4];
+    az_tag_password(raw_uid, password);
+    memcpy(data->page[133].data, password, sizeof(password));
+    static const uint8_t pack[4] = {0x80U, 0x80U, 0x00U, 0x00U};
+    memcpy(data->page[134].data, pack, sizeof(pack));
+    data->pages_total = 135U;
+    data->pages_read = 135U;
+
+    uint8_t encrypted[AZ_DUMP_SIZE];
+    uint8_t plain[AZ_DUMP_SIZE];
+    if(!az_nfc_export_v2_dump(app->nfc_device, encrypted) ||
+       !az_decrypt_dump(encrypted, &app->keys, plain)) {
+        return false;
+    }
+
+    AzFigure figure;
+    memset(&figure, 0, sizeof(figure));
+    memcpy(figure.id, encrypted + 84U, sizeof(figure.id));
+    if(!az_db_find_by_id(app->storage, figure.id, &figure)) {
+        memcpy(figure.id, encrypted + 84U, sizeof(figure.id));
+        figure.category = figure.id[6];
+        figure.type = figure.id[3];
+        az_str_copy(figure.name, sizeof(figure.name), "Scanned Amiibo");
+    }
+
+    char path[AZ_PATH_MAX];
+    path[0] = '\0';
+    az_make_unique_save_path(
+        app->storage,
+        &figure,
+        figure.name[0] ? figure.name : "Scanned Amiibo",
+        path,
+        sizeof(path));
+    if(!path[0] || !az_nfc_save_device(app->nfc_device, path)) return false;
+    const char* slash = strrchr(path, '/');
+    az_str_copy(app->tag_saved_filename, sizeof(app->tag_saved_filename), slash ? slash + 1 : path);
+    return true;
+}
+
+/** Begin a two-phase blank-tag write. */
+bool az_tag_write_begin(AmiiboZeroApp* app, const uint8_t encrypted_dump[AZ_DUMP_SIZE]) {
+    if(!app || !encrypted_dump || !app->keys.valid || app->tag_poller || app->tag_work_dump) {
+        return false;
+    }
+    app->tag_work_dump = malloc(AZ_DUMP_SIZE);
+    if(!app->tag_work_dump) return false;
+    memcpy(app->tag_work_dump, encrypted_dump, AZ_DUMP_SIZE);
+    memset(app->tag_target_uid, 0, sizeof(app->tag_target_uid));
+    app->tag_saved_filename[0] = '\0';
+    app->tag_operation = AzTagOperationWrite;
+    app->tag_stage = AzTagStageScanBlank;
+    app->tag_progress = 0U;
+    if(!az_tag_start_poller(app)) {
+        free(app->tag_work_dump);
+        app->tag_work_dump = NULL;
+        app->tag_operation = AzTagOperationNone;
+        app->tag_stage = AzTagStageIdle;
+        return false;
+    }
+    return true;
+}
+
+/** Begin reading one physical NTAG215 Amiibo for native saving. */
+bool az_tag_read_save_begin(AmiiboZeroApp* app) {
+    if(!app || !app->keys.valid || app->tag_poller || app->tag_work_dump) return false;
+    app->tag_saved_filename[0] = '\0';
+    app->tag_operation = AzTagOperationReadSave;
+    app->tag_stage = AzTagStageReading;
+    app->tag_progress = 0U;
+    return az_tag_start_poller(app);
+}
+
+/** Begin read/authenticate/clear for one existing retail NTAG215 Amiibo. */
+bool az_tag_clear_begin(AmiiboZeroApp* app) {
+    if(!app || !app->keys.valid || app->tag_poller || app->tag_work_dump) return false;
+    app->tag_work_dump = malloc(AZ_DUMP_SIZE);
+    if(!app->tag_work_dump) return false;
+    memset(app->tag_target_uid, 0, sizeof(app->tag_target_uid));
+    app->tag_saved_filename[0] = '\0';
+    app->tag_operation = AzTagOperationClear;
+    app->tag_stage = AzTagStageReading;
+    app->tag_progress = 0U;
+    if(!az_tag_start_poller(app)) {
+        free(app->tag_work_dump);
+        app->tag_work_dump = NULL;
+        app->tag_operation = AzTagOperationNone;
+        app->tag_stage = AzTagStageIdle;
+        return false;
+    }
+    return true;
+}
+
+/** Cancel a physical-tag operation and release all transient memory. */
+void az_tag_operation_cancel(AmiiboZeroApp* app) {
+    if(!app) return;
+    if(app->tag_poller) az_tag_release_poller(app);
+    free(app->tag_work_dump);
+    app->tag_work_dump = NULL;
+    app->tag_operation = AzTagOperationNone;
+    app->tag_stage = AzTagStageIdle;
+    app->tag_result = AzTagResultNone;
+    app->tag_phase_done = false;
+    app->tag_progress = 0U;
+    memset(app->tag_target_uid, 0, sizeof(app->tag_target_uid));
+    app->tag_saved_filename[0] = '\0';
+}
+
+/** Finalize one operation without erasing its user-visible result. */
+static void az_tag_operation_done(AmiiboZeroApp* app, AzTagResult result) {
+    free(app->tag_work_dump);
+    app->tag_work_dump = NULL;
+    app->tag_result = result;
+    app->tag_stage = AzTagStageDone;
+    app->tag_phase_done = false;
+    app->tag_progress = result == AzTagResultSuccess ? 100U : app->tag_progress;
+}
+
+/**
+ * @brief Advance physical-tag workflows outside the NFC worker thread.
+ *
+ * Crypto and filesystem work deliberately run here on the application/UI thread, not inside
+ * the NFC worker callback, keeping the NFC thread stack limited to protocol transactions.
+ */
+void az_tag_operation_tick(AmiiboZeroApp* app) {
+    if(!app || !app->tag_phase_done || !app->tag_poller) return;
+
+    const AzTagStage completed_stage = app->tag_stage;
+    const AzTagResult phase_result = app->tag_result;
+    const MfUltralightData* read_data = NULL;
+    if(completed_stage == AzTagStageReading && phase_result == AzTagResultSuccess) {
+        read_data = (const MfUltralightData*)nfc_poller_get_data(app->tag_poller);
+        if(read_data) nfc_device_set_data(app->nfc_device, NfcProtocolMfUltralight, read_data);
+    }
+    az_tag_release_poller(app);
+    app->tag_phase_done = false;
+
+    if(phase_result != AzTagResultSuccess) {
+        az_tag_operation_done(app, phase_result);
+        return;
+    }
+
+    if(app->tag_operation == AzTagOperationWrite && completed_stage == AzTagStageScanBlank) {
+        app->tag_stage = AzTagStagePreparing;
+        app->tag_result = AzTagResultNone;
+        if(!az_rekey_dump_uid_to(
+               app->tag_work_dump,
+               &app->keys,
+               app->tag_target_uid,
+               app->tag_work_dump)) {
+            az_tag_operation_done(app, AzTagResultCryptoFailed);
+            return;
+        }
+        app->tag_stage = AzTagStageWriting;
+        app->tag_progress = 0U;
+        if(!az_tag_start_poller(app)) az_tag_operation_done(app, AzTagResultWriteFailed);
+        return;
+    }
+
+    if(app->tag_operation == AzTagOperationWrite && completed_stage == AzTagStageWriting) {
+        az_tag_operation_done(app, AzTagResultSuccess);
+        return;
+    }
+
+    if(app->tag_operation == AzTagOperationReadSave && completed_stage == AzTagStageReading) {
+        const MfUltralightData* copied =
+            (const MfUltralightData*)nfc_device_get_data(app->nfc_device, NfcProtocolMfUltralight);
+        if(!copied || copied->type != MfUltralightTypeNTAG215) {
+            az_tag_operation_done(app, AzTagResultWrongTag);
+        } else if(!az_tag_save_read_device(app, copied)) {
+            uint8_t encrypted[AZ_DUMP_SIZE];
+            uint8_t plain[AZ_DUMP_SIZE];
+            if(!az_nfc_export_v2_dump(app->nfc_device, encrypted) ||
+               !az_decrypt_dump(encrypted, &app->keys, plain)) {
+                az_tag_operation_done(app, AzTagResultNotAmiibo);
+            } else {
+                az_tag_operation_done(app, AzTagResultSaveFailed);
+            }
+        } else {
+            az_tag_operation_done(app, AzTagResultSuccess);
+        }
+        return;
+    }
+
+    if(app->tag_operation == AzTagOperationClear && completed_stage == AzTagStageReading) {
+        const MfUltralightData* copied =
+            (const MfUltralightData*)nfc_device_get_data(app->nfc_device, NfcProtocolMfUltralight);
+        if(!copied || copied->type != MfUltralightTypeNTAG215 || copied->pages_total < 133U) {
+            az_tag_operation_done(app, AzTagResultWrongTag);
+            return;
+        }
+        const uint8_t* bytes = (const uint8_t*)copied->page;
+        memcpy(app->tag_target_uid, bytes, sizeof(app->tag_target_uid));
+        if(!az_clear_user_data_dump(bytes, &app->keys, app->tag_work_dump)) {
+            az_tag_operation_done(app, AzTagResultNotAmiibo);
+            return;
+        }
+        app->tag_stage = AzTagStageClearing;
+        app->tag_result = AzTagResultNone;
+        app->tag_progress = 0U;
+        if(!az_tag_start_poller(app)) az_tag_operation_done(app, AzTagResultWriteFailed);
+        return;
+    }
+
+    if(app->tag_operation == AzTagOperationClear && completed_stage == AzTagStageClearing) {
+        az_tag_operation_done(app, AzTagResultSuccess);
+        return;
+    }
+
+    az_tag_operation_done(app, AzTagResultReadFailed);
 }
