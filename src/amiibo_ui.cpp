@@ -424,6 +424,10 @@ void az_emulation_stop(AmiiboZeroApp* app) {
  */
 void az_ui_emulation_randomize_uid(AmiiboZeroApp* app) {
     if(!app || !app->emulating) return;
+    if(az_nfc_device_is_v3(app->nfc_device)) {
+        az_ui_toast(app, "V3 UID is fixed");
+        return;
+    }
     if(!app->keys.valid) {
         az_ui_toast(app, "key_retail.bin required");
         return;
@@ -850,6 +854,32 @@ bool az_ui_start_database_prepare(AmiiboZeroApp* app, bool force) {
 }
 
 /**
+ * @brief Collapse navigation back to the launch root without resuming covered screens.
+ *
+ * A pushed screen stays alive until it is popped, so a deep navigation history can keep lifecycle
+ * state around that did not exist during the initial database build. Forced database preparation is
+ * deliberately a low-memory operation: unwind every covered entry, run each pop cleanup exactly
+ * once, then reactivate Home as the same root used at launch. The caller may push its return screen
+ * again before entering Working.
+ */
+static void az_ui_reset_stack_to_launch_root(AmiiboZeroApp* app) {
+    if(!app || app->ui_stack_depth == 0U) return;
+
+    az_ui_stack_sync_top(app);
+    while(app->ui_stack_depth > 1U) {
+        const AzScreen popped = app->ui_stack[app->ui_stack_depth - 1U].screen;
+        az_ui_screen_for(popped).onPopped(app);
+        app->ui_stack_depth--;
+    }
+
+    AzUiStackEntry* root = &app->ui_stack[0];
+    root->screen = AzScreenHome;
+    root->selection = app->screen_selection[AzScreenHome];
+    root->detail_scroll = 0U;
+    az_ui_stack_activate_top(app);
+}
+
+/**
  * @brief Release on-demand runtime records before a memory-intensive forced index rebuild.
  *
  * The application launches with these catalogs/results absent and with an empty NFC device. Returning
@@ -880,8 +910,15 @@ static void az_release_runtime_records_for_index_refresh(AmiiboZeroApp* app) {
  * @brief Reload keys, release on-demand records, and start a forced background index refresh.
  */
 void az_ui_status_refresh(AmiiboZeroApp* app) {
+    if(!app) return;
+
+    /* Reproduce the launch-time memory shape before the sorter starts. The stack framework keeps
+     * covered screens alive by design, so explicitly retire them before releasing shared catalogs. */
+    az_ui_reset_stack_to_launch_root(app);
     az_release_runtime_records_for_index_refresh(app);
+
     app->keys.valid = az_keys_load(app->storage, &app->keys);
+    az_ui_navigate(app, AzScreenStatus, false);
     if(!az_ui_start_database_prepare(app, true)) {
         az_ui_toast(app, "Refresh already running");
     }

@@ -20,15 +20,19 @@ void AzDumpInfoScreen::draw(Canvas* canvas, const AzViewModel* model) const {
     az_ui_format_figure_id(&model->figure, id_hex);
     const char* lockon_line = v3 ? (app->current_lockon_valid ? "\nLock-on: attached" : "\nLock-on: missing") : "";
     if(!details->available) {
+        const char* unavailable = v3 ?
+            "V3 encrypted user details are not decoded. Raw console writes are preserved; figure identity and lock-on remain available." :
+            "Encrypted details unavailable. A valid key_retail.bin is required and the dump must authenticate.";
         snprintf(
             text,
             sizeof(text),
-            "Type: %s%s\nID: %s\nFile: %s%s\nEncrypted details unavailable. A valid key_retail.bin is required and the dump must authenticate.",
+            "Type: %s%s\nID: %s\nFile: %s%s\n%s",
             az_figure_type_name(model->figure.id[3]),
             v3 ? " / Lock-on" : "",
             id_hex,
             model->saved_filename,
-            lockon_line);
+            lockon_line,
+            unavailable);
     } else {
         unsigned long app_hi = (unsigned long)(details->application_id >> 32);
         unsigned long app_lo = (unsigned long)(details->application_id & 0xFFFFFFFFULL);

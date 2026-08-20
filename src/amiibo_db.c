@@ -20,7 +20,7 @@
 #define AZ_JSON_RANGE_BUFFER 512U
 
 /** @brief Constant used for sort run records. */
-#define AZ_SORT_RUN_RECORDS 128U
+#define AZ_SORT_RUN_RECORDS 64U
 
 /** @brief Constant used for sort batch target records. */
 #define AZ_SORT_BATCH_TARGET_RECORDS 512U
@@ -1962,7 +1962,10 @@ static bool az_index_build(
             progress_callback,
             progress_context,
             &batch_allocation_failed);
-        const bool allow_external_sort_fallback = false;
+        /* The UI framework has a small fixed heap cost, and a forced refresh may run with less
+         * contiguous RAM than the initial launch. Fall back to the bounded external merge sorter
+         * instead of treating a fast-batch allocation miss as a database failure. */
+        const bool allow_external_sort_fallback = true;
         if(!ok && batch_allocation_failed && allow_external_sort_fallback) {
             const char* sorted_figure_path = AZ_INDEX_SORT_RUNS;
             ok = az_prepare_sorted_figures(

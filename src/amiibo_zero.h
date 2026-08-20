@@ -25,9 +25,9 @@
 /** Application semantic version. */
 #define AZ_APP_VERSION "0.1.0"
 
-/** Compile-time heap overlay; enabled by default for memory-debug builds. */
+/** Compile-time heap overlay. */
 #ifndef AZ_DISABLE_MEMORY_OVERLAY
-#define AZ_DEBUG_MEMORY_OVERLAY
+//#define AZ_DEBUG_MEMORY_OVERLAY
 #endif
 
 /** App-owned SD-card directory. */
@@ -363,7 +363,6 @@ struct AmiiboZeroApp {
     bool v3_i2c_listener;                       /**< True when the stock-derived I2C Plus listener is active. */
     bool v3_sector_select_pending;              /**< Waiting for the second SECTOR_SELECT frame. */
     bool v3_authenticated;                      /**< Current PWD_AUTH state, reset like Flipper's MFUL listener. */
-    bool v3_sram_ready;                         /**< Live NS_REG.SRAM_RF_READY state for the lock-on mailbox. */
     uint8_t v3_sector;                          /**< Current NTAG I2C logical sector selected over NFC. */
     bool emulating;                             /**< True while listener is actively emulating. */
     bool emulation_persistent;                  /**< Save synchronized writes to emulation_path. */
@@ -632,10 +631,12 @@ bool az_nfc_listener_start(AmiiboZeroApp* app);
 bool az_nfc_listener_pause_and_sync(AmiiboZeroApp* app);
 
 /**
- * @brief Randomize the UID of an existing Amiibo device by decrypting and re-signing it.
+ * @brief Randomize the UID of a standard NTAG215 Amiibo by decrypting and re-signing it.
  * @param device Mutable NFC device; caller must stop RF emulation before invoking.
  * @param keys Valid retail key material.
- * @return True when the old dump authenticated and the new UID image was installed.
+ * @return True when a standard dump authenticated and the new UID image was installed.
+ * @note Type-3 UID randomization is intentionally unsupported because games bind v3 figures
+ *       to their original UID.
  */
 bool az_nfc_randomize_uid(NfcDevice* device, const AzKeys* keys);
 

@@ -84,10 +84,12 @@ For clear, the authenticated encrypted dump is reset in plaintext by clearing by
 
 Never mutate authenticated UID-dependent Amiibo state while the listener is active.
 
-The UID-randomization sequence is:
+UID randomization is a standard NTAG215-only feature. Type-3 screens hide the action, the UI controller rejects it, and `az_nfc_randomize_uid()` refuses non-NTAG215 devices so v3 identity cannot be changed accidentally.
 
-1. stop whichever backend is active (`NfcListener` for NTAG215 or the raw NFC worker for type-3);
-2. synchronize standard-listener writes into the owned device; custom type-3 writes already target the owned device directly;
+For standard NTAG215, the UID-randomization sequence is:
+
+1. stop the active `NfcListener`;
+2. synchronize listener writes into the owned device;
 3. free/clear the active listener state;
 4. authenticate/decrypt the standard logical dump;
 5. replace the UID in plaintext;
@@ -119,13 +121,15 @@ Generation must also use the v3 UID representation. Unlike NTAG215, real v3 meta
 
 ### Stock-derived type-3 listener
 
-Flipper's firmware emulates NTAG215 and NTAG I2C Plus through the same `MfUltralightListener` state machine. Amiibo Zero mirrors that listener's common behavior for type-3 tags: exact command-length dispatch, standard response CRC-A, four-bit ACK/NAK, PWD_AUTH state, hidden PWD/PACK reads, lock/write rules, `NfcCommandSleep` after invalid or unsupported commands, and reset of sector/auth state on raw frames, HALT, or field loss. This replaces the older flat 2048-byte pixl.js command loop.
+Flipper's firmware emulates NTAG215 and NTAG I2C Plus through the same `MfUltralightListener` state machine. Amiibo Zero mirrors its framing/state behavior for type-3 tags: exact command-length dispatch, standard response CRC-A, four-bit ACK/NAK, hidden Sector-0 PWD/PACK reads, lock/write rules, `NfcCommandSleep` after invalid or unsupported commands, and reset of sector/auth state on raw frames, HALT, or field loss. For v3 interoperability, `PWD_AUTH` deliberately follows pixl.js and returns PACK without requiring the locally derived password; physical lock/config rules still gate writes.
 
-The app-specific additions are limited to I2C Plus behavior that the stock listener cannot provide for this use case. Logical sector-0 `EC/ED` maps to native pages `234/235`; sector-1 page `xx` maps to `236 + xx`; sector-3 `F8/F9` mirrors the session registers. Sector-0 SRAM `F0-FF` stays external in `current_lockon_sram`. `FAST_WRITE F0-FF` ACKs the 64-byte mailbox request and marks the preselected lock-on response ready; subsequent reads of `ED`/`F9` expose `NS_REG.SRAM_RF_READY`, while READ/FAST_READ of `F0-FF` returns that 64-byte response. The command path accepts up to 64 FAST_READ pages (256 payload bytes), matching Flipper's stock listener rather than the previous 255-byte cap.
+Do not apply the generic NTAG21x access structure blindly to I2C Plus 2K. `AUTH0` at `E3` protects only Sector 0 through `EB` and explicitly excludes the dynamic-lock page; `ACCESS.NFC_DIS_SEC1` at `E4` controls whether Sector 1 is visible; `PT_I2C.2K_PROT`/`SRAM_PROT` at `E7` independently protect Sector 1/SRAM; the dynamic-lock bytes are at `E2` with 32-page granularity; and `REG_LOCK_NFC` is `E9` byte 2 bit 0. `EC/ED` and mirrored `F8/F9` are read-only through NFC. These are physical RF addresses, not `pages_total - N` offsets from Flipper's compact backing array.
+
+Logical sector-0 `EC/ED` maps to native pages `234/235`; sector-1 page `xx` maps to `236 + xx`; sector-3 `F8/F9` mirrors the session registers. Sector-0 SRAM `F0-FF` stays external in `current_lockon_sram`. `FAST_WRITE F0-FF` ACKs the 64-byte mailbox request without overwriting the preselected lock-on response. Following pixl.js's Joy-Con scan fix, every read exposing `NS_REG` asserts `SRAM_RF_READY`, including a normal `READ EC` response window; READ/FAST_READ of `F0-FF` returns the selected 64-byte response. The command path accepts up to 64 FAST_READ pages (256 payload bytes), matching Flipper's stock listener rather than the previous 255-byte cap.
 
 The first SECTOR_SELECT frame receives a four-bit ACK. The second frame must be four bytes, updates the selected sector, and is completed with the same silent/reset outcome used by Flipper's composite command handler. `GET_VERSION` returns `00 04 04 05 02 02 15 03` from the native `MfUltralightData::version` field.
 
-Generation reference metadata for current v3 figures is `page 02 = 44 00 0F E0`, `page 03 = F1 10 FF EE`, and `page 04 = A5 00 00 00`. The supplied genuine dumps also agree on configuration pages `E7 = 08 00 00 00`, `E8 = 01 00 F8 48`, and `E9 = 08 01 00 00`; preserve these values unless new hardware evidence shows a revision-specific difference.
+Generation reference metadata follows the pixl.js v3 image: `page 02 = 44 00 0F E0`, `page 03 = F1 10 FF EE`, `page 04 = A5 00 00 00`, `E2 = 01 00 FF 00`, `E3 = 00 00 00 04`, `E4 = 07 00 00 00`, raw `E5-EB = 00...00`, `EC = 41 00 F8 48`, and `ED = 08 01 29 00`. Amiibo Zero subsequently stores the hidden UID-derived PWD and `80 80` PACK at native `E5/E6`; reads of those Sector-0 pages still return zeroes.
 
 The implementation uses Flipper firmware and pixl.js as interoperability references; neither project's source files nor lock-on payloads are bundled into Amiibo Zero.
 
@@ -198,7 +202,7 @@ Before packaging:
 - verify short lock-on payload padding/CRC, 64-byte normalization, and invalid-size rejection;
 - verify v3 `FAST_WRITE` is ACKed without overwriting the selected mailbox response and `FAST_READ F0-FF` returns that response;
 - verify two-step v3 `SECTOR_SELECT` maps sector-1 reads to the contiguous backing pages;
-- verify UID randomization preserves the selected lock-on SRAM;
+- verify v3 emulation hides/rejects UID randomization and leaves the selected lock-on SRAM untouched;
 - verify native type-3 page mapping does not alias sector-0 SRAM onto sector-1 backing;
 - verify saved lock-on sidecar load/save/CRC, transactional replacement, rename, and delete lifecycle;
 - test saved rename collision handling and selection restoration;
