@@ -83,7 +83,7 @@ export async function prepareInstallPayload(keyFile, onStatus = () => {}) {
         loadRelease(),
         fetchMinifiedJson(SOURCE_URLS.amiibo),
         fetchMinifiedJson(SOURCE_URLS.games),
-        readKeyFile(keyFile),
+        keyFile ? readKeyFile(keyFile) : Promise.resolve(null),
     ]);
 
     return {release, amiibo, games, key};
@@ -97,10 +97,14 @@ export async function installPayload(flipper, payload, onStep, onProgress) {
 
     const files = [
         {id: 'fap', label: 'Amiibo Zero FAP', path: DEVICE_PATHS.app, bytes: payload.release.fap},
-        {id: 'key', label: 'key_retail.bin', path: DEVICE_PATHS.key, bytes: payload.key},
+        ...(payload.key ? [{id: 'key', label: 'key_retail.bin', path: DEVICE_PATHS.key, bytes: payload.key}] : []),
         {id: 'amiibo', label: 'amiibo.json', path: DEVICE_PATHS.amiibo, bytes: payload.amiibo.bytes},
         {id: 'games', label: 'games_info.json', path: DEVICE_PATHS.games, bytes: payload.games.bytes},
     ];
+
+    if (!payload.key) {
+        onStep('key', 'done', 'Using existing key_retail.bin');
+    }
 
     for (const file of files) {
         onStep(file.id, 'uploading', `Uploading ${file.label}…`);

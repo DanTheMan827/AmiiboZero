@@ -7,11 +7,13 @@ A static Vite/React installer for Amiibo Zero. It talks directly to a Flipper Ze
 | File | Flipper path | Source |
 | --- | --- | --- |
 | `amiibo_zero.fap` | `/ext/apps/NFC/amiibo_zero.fap` | Release-channel FAP from the same GitHub Actions run |
-| `key_retail.bin` | `/ext/apps_data/amiibo_zero/key_retail.bin` | User-selected local file; must be 160 bytes |
+| `key_retail.bin` | `/ext/apps_data/amiibo_zero/key_retail.bin` | Reuses an existing 160-byte file; otherwise the user selects a local 160-byte replacement |
 | `amiibo.json` | `/ext/apps_data/amiibo_zero/amiibo.json` | `https://dantheman827.github.io/AmiiboData/database/amiibo.json` |
 | `games_info.json` | `/ext/apps_data/amiibo_zero/games_info.json` | `https://dantheman827.github.io/AmiiboData/database/games_info.json` |
 
 The two JSON files are fetched at install time, parsed with `JSON.parse()`, and serialized again with `JSON.stringify()` before transfer. That validates the payload as JSON and removes formatting whitespace.
+
+After connecting, the installer runs `storage stat` on `key_retail.bin`. If the file already exists and is exactly 160 bytes, it is reused and no local key selection is required. A user-selected key remains available as an explicit replacement. Missing or incorrectly sized on-device keys must be replaced before installation can start.
 
 The retail key is never sent to a server. JavaScript reads it locally and writes it only to the connected Flipper Zero over USB serial.
 

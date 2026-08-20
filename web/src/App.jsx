@@ -54,6 +54,7 @@ function App() {
     const [connected, setConnected] = useState(false);
     const [busy, setBusy] = useState(false);
     const [keyFile, setKeyFile] = useState(null);
+    const [deviceKeySize, setDeviceKeySize] = useState(null);
     const [message, setMessage] = useState('Connect your Flipper Zero to begin.');
     const [error, setError] = useState('');
     const [release, setRelease] = useState(null);
@@ -61,7 +62,10 @@ function App() {
     const [steps, setSteps] = useState(initialSteps);
 
     const serialSupported = FlipperSerial.isSupported();
-    const ready = connected && keyFile && !busy && serialSupported && release;
+    const hasValidSelectedKey = keyFile?.size === 160;
+    const hasValidDeviceKey = deviceKeySize === 160;
+    const keyReady = keyFile ? hasValidSelectedKey : hasValidDeviceKey;
+    const ready = connected && keyReady && !busy && serialSupported && release;
 
     useEffect(() => {
         document.documentElement.dataset.theme = theme;
@@ -102,10 +106,19 @@ function App() {
         try {
             const info = await serialRef.current.connect();
             const model = info.match(/hardware_model\s*:\s*([^\r\n]+)/i)?.[1]?.trim() || 'Flipper Zero';
+            const existingKeySize = await serialRef.current.fileSize(DEVICE_PATHS.key);
+            setDeviceKeySize(existingKeySize);
             setConnected(true);
-            setMessage(`${model} connected. Choose your key file, then install.`);
+            if (existingKeySize === 160) {
+                setMessage(`${model} connected. Existing key_retail.bin found; no key selection is required.`);
+            } else if (existingKeySize == null) {
+                setMessage(`${model} connected. Choose key_retail.bin, then install.`);
+            } else {
+                setMessage(`${model} connected. Existing key_retail.bin is ${existingKeySize} bytes and must be replaced.`);
+            }
         } catch (err) {
             setConnected(false);
+            setDeviceKeySize(null);
             setError(err.message);
             setMessage('Connection failed.');
             await serialRef.current.disconnect();
@@ -118,6 +131,7 @@ function App() {
         setBusy(true);
         await serialRef.current.disconnect();
         setConnected(false);
+        setDeviceKeySize(null);
         setBusy(false);
         setMessage('Flipper disconnected.');
     }
@@ -127,10 +141,11 @@ function App() {
         setBusy(true);
         setSteps(initialSteps);
         try {
+            if (!keyReady) throw new Error('A valid 160-byte key_retail.bin is required on the Flipper or selected locally.');
             const payload = await prepareInstallPayload(keyFile, setMessage);
             setSizes({
                 fap: payload.release.fap.length,
-                key: payload.key.length,
+                key: payload.key?.length ?? deviceKeySize ?? 0,
                 amiibo: payload.amiibo.minifiedBytes,
                 games: payload.games.minifiedBytes,
                 amiiboOriginal: payload.amiibo.sourceBytes,
@@ -139,6 +154,7 @@ function App() {
 
             setMessage('Preparing Flipper storage…');
             await installPayload(serialRef.current, payload, updateStep, updateProgress);
+            if (payload.key) setDeviceKeySize(payload.key.length);
             setMessage(`Installation complete. Launch Amiibo from Apps → NFC on your Flipper Zero.`);
         } catch (err) {
             setError(err.message);
@@ -167,7 +183,7 @@ function App() {
                 <section className="hero">
                     <div className="eyebrow"><span className="pulse-dot" /> Release installer · {releaseLabel}</div>
                     <h1>Install Amiibo Zero<br /><span>directly from your browser.</span></h1>
-                    <p>Connect over USB, provide your own retail key, and the installer will transfer the release FAP plus freshly downloaded, minified Amiibo databases to your Flipper Zero.</p>
+                    <p>Connect over USB and the installer will transfer the release FAP plus freshly downloaded, minified Amiibo databases to your Flipper Zero. If a valid retail key is not already installed, you can provide it locally.</p>
                     <div className="hero-actions">
                         {!connected ? (
                             <button className="primary-button" onClick={connect} disabled={!serialSupported || busy}><Icon name="usb" /> Connect Flipper Zero</button>
@@ -185,10 +201,16 @@ function App() {
                 <section className="installer-grid">
                     <div className="panel setup-panel">
                         <div className="panel-heading">
-                            <div><span className="section-kicker">1 · Private key</span><h2>Select key_retail.bin</h2></div>
+                            <div><span className="section-kicker">1 · Private key</span><h2>Amiibo retail key</h2></div>
                             <Icon name="shield" size={24} />
                         </div>
-                        <p>Your 160-byte combined Amiibo retail key is read locally by the browser and sent only to the connected Flipper. It is never uploaded to this site.</p>
+                        <p>A valid 160-byte key already on the Flipper is reused automatically. Otherwise, select your combined key_retail.bin; it is read locally and sent only over USB.</p>
+                        {connected && hasValidDeviceKey && !keyFile && (
+                            <div className="key-present-note"><Icon name="check" /><div><strong>key_retail.bin already installed</strong><span>{DEVICE_PATHS.key} · 160 bytes</span></div></div>
+                        )}
+                        {connected && deviceKeySize != null && !hasValidDeviceKey && !keyFile && (
+                            <div className="inline-warning">The existing key_retail.bin is {deviceKeySize} bytes, not 160 bytes. Select a valid replacement.</div>
+                        )}
                         <label className={`file-picker ${keyFile ? 'has-file' : ''}`}>
                             <input type="file" accept=".bin,application/octet-stream" onChange={(event) => {
                                 const file = event.target.files?.[0] || null;
@@ -197,8 +219,8 @@ function App() {
                             }} />
                             <span className="file-picker-icon"><Icon name={keyFile ? 'check' : 'key'} /></span>
                             <span className="file-picker-copy">
-                                <strong>{keyFile ? keyFile.name : 'Choose key_retail.bin'}</strong>
-                                <small>{keyFile ? `${formatBytes(keyFile.size)} selected` : 'Expected size: exactly 160 bytes'}</small>
+                                <strong>{keyFile ? keyFile.name : hasValidDeviceKey ? 'Replace key_retail.bin (optional)' : 'Choose key_retail.bin'}</strong>
+                                <small>{keyFile ? `${formatBytes(keyFile.size)} selected` : hasValidDeviceKey ? 'A valid 160-byte key is already on the Flipper' : 'Expected size: exactly 160 bytes'}</small>
                             </span>
                             <span className="file-picker-action">Browse</span>
                         </label>
@@ -217,7 +239,7 @@ function App() {
                         </div>
                         <div className="resource-list">
                             <ResourceRow icon="package" title="Amiibo Zero" subtitle={`${DEVICE_PATHS.app}`} detail={sizes.fap ? formatBytes(sizes.fap) : releaseLabel} step={steps.fap} />
-                            <ResourceRow icon="key" title="key_retail.bin" subtitle="Your local 160-byte key" detail={keyFile ? formatBytes(keyFile.size) : 'Required'} step={steps.key} />
+                            <ResourceRow icon="key" title="key_retail.bin" subtitle={keyFile ? 'Local replacement key' : hasValidDeviceKey ? 'Existing key on Flipper' : 'Your local 160-byte key'} detail={keyFile ? formatBytes(keyFile.size) : hasValidDeviceKey ? 'Already installed' : 'Required'} step={steps.key} />
                             <ResourceRow icon="database" title="amiibo.json" subtitle="Fetched live, parsed, then JSON.stringify() minified" detail={sizes.amiibo ? formatBytes(sizes.amiibo) : 'Current database'} step={steps.amiibo} />
                             <ResourceRow icon="database" title="games_info.json" subtitle="Fetched live, parsed, then JSON.stringify() minified" detail={sizes.games ? formatBytes(sizes.games) : 'Current database'} step={steps.games} />
                         </div>
@@ -232,7 +254,7 @@ function App() {
                         <span className={`status-light ${error ? 'error' : busy ? 'working' : connected ? 'ready' : ''}`} />
                         <div><strong>{error ? 'Needs attention' : busy ? 'Working' : connected ? 'Ready to install' : 'Waiting for Flipper'}</strong><span>{error || message}</span></div>
                     </div>
-                    <button className="primary-button install-button" disabled={!ready || keyFile?.size !== 160} onClick={install}>
+                    <button className="primary-button install-button" disabled={!ready} onClick={install}>
                         {busy ? <span className="spinner" /> : <Icon name="download" />} Install everything
                     </button>
                 </section>

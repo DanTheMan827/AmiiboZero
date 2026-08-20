@@ -212,6 +212,17 @@ export class FlipperSerial {
         return this.command(`storage stat ${quotePath(path)}`);
     }
 
+    async fileSize(path) {
+        const stat = await this.stat(path);
+        const match = stat.match(/File, size:\s*(\d+)b/i);
+        if (match) return Number(match[1]);
+
+        const error = storageError(stat);
+        if (error && /not exist|invalid name\/path/i.test(error)) return null;
+        if (error) throw new Error(`Unable to inspect ${path}: ${error}`);
+        return null;
+    }
+
     async ensureDirectory(path) {
         const stat = await this.stat(path);
         if (/\bDirectory\b/.test(stat) || /\bStorage\b/.test(stat)) return;

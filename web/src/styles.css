@@ -213,3 +213,19 @@ footer { max-width: 1120px; margin: 0 auto; padding: 28px; border-top: 1px solid
     .resource-title-line { align-items: flex-start; flex-direction: column; gap: 2px; }
     footer { flex-direction: column; padding: 24px 18px; }
 }
+
+.key-present-note {
+    display: flex;
+    gap: 11px;
+    align-items: center;
+    margin: 0 0 12px;
+    padding: 12px 14px;
+    border: 1px solid color-mix(in srgb, var(--success) 34%, var(--line));
+    border-radius: 14px;
+    background: var(--success-soft);
+    color: var(--success);
+}
+.key-present-note strong,
+.key-present-note span { display: block; }
+.key-present-note strong { font-size: 13px; }
+.key-present-note span { margin-top: 2px; color: var(--text-muted); font-size: 11px; word-break: break-all; }

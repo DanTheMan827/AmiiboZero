@@ -59,3 +59,34 @@ test('install payload uses the expected Flipper paths and ordering', async () =>
     assert.ok(states.includes('fap:done'));
     assert.ok(states.includes('games:done'));
 });
+
+
+test('install payload reuses an existing key when no replacement bytes are supplied', async () => {
+    const writes = [];
+    const states = [];
+    const flipper = {
+        ensureDirectory: async () => {},
+        writeFile: async (path, bytes, onProgress) => {
+            writes.push([path, bytes.length]);
+            onProgress(1);
+        },
+    };
+
+    await installPayload(
+        flipper,
+        {
+            release: {fap: new Uint8Array(12)},
+            key: null,
+            amiibo: {bytes: new Uint8Array(20)},
+            games: {bytes: new Uint8Array(30)},
+        },
+        (id, state, message) => states.push([id, state, message]),
+        () => {},
+    );
+
+    assert.deepEqual(
+        writes.map(([path]) => path),
+        [DEVICE_PATHS.app, DEVICE_PATHS.amiibo, DEVICE_PATHS.games],
+    );
+    assert.ok(states.some(([id, state, message]) => id === 'key' && state === 'done' && /existing/i.test(message)));
+});

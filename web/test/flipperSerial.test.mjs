@@ -106,3 +106,17 @@ test('readDeviceInfo waits for hardware_model instead of a stale CLI prompt', as
     assert.deepEqual(flipper.reads, ['hardware_model', '>: ']);
     assert.match(info, /hardware_model\s*:\s*Flipper Zero/i);
 });
+
+
+test('fileSize returns the installed size or null for a missing file', async () => {
+    class StatMock extends FlipperSerial {
+        async stat(path) {
+            if (path.endsWith('key_retail.bin')) return 'File, size: 160b\r\n';
+            return 'Storage error: file/dir not exist\r\n';
+        }
+    }
+
+    const flipper = new StatMock();
+    assert.equal(await flipper.fileSize('/ext/apps_data/amiibo_zero/key_retail.bin'), 160);
+    assert.equal(await flipper.fileSize('/ext/apps_data/amiibo_zero/missing.bin'), null);
+});
