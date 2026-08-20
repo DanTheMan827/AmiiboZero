@@ -12,6 +12,7 @@
 #include <string.h>
 #include <toolbox/crc32_calc.h>
 #include <furi/core/memmgr.h>
+#include <furi/core/memmgr_heap.h>
 
 /** @brief Constant used for JSON file buffer. */
 #define AZ_JSON_FILE_BUFFER 2048U
@@ -20,12 +21,12 @@
 #define AZ_JSON_RANGE_BUFFER 512U
 
 /** @brief Constant used for sort run records. */
-#define AZ_SORT_RUN_RECORDS 64U
+#define AZ_SORT_RUN_RECORDS 8U
 
 /** @brief Constant used for sort batch target records. */
 #define AZ_SORT_BATCH_TARGET_RECORDS 512U
 
-/** @brief Number of figure records stored in each fast-sort heap slab. */
+/** @brief Number of compact figure sort keys stored in each fast-sort heap slab. */
 #define AZ_SORT_BATCH_CHUNK_RECORDS 8U
 
 /** @brief Minimum heap headroom retained while growing enough slabs for the largest category. */
@@ -34,14 +35,14 @@
 /** @brief Preferred heap headroom retained once the largest category fits in RAM. */
 #define AZ_SORT_HEAP_PREFERRED_RESERVE 6144U
 
-/** @brief Constant used for sort batch scan records. */
-#define AZ_SORT_BATCH_SCAN_RECORDS 8U
+/** @brief Conservative allowance for allocator metadata/alignment when checking a free block. */
+#define AZ_SORT_ALLOC_BLOCK_GUARD 32U
 
-/** @brief Constant used for sort batch write records. */
-#define AZ_SORT_BATCH_WRITE_RECORDS 32U
+/** @brief Constant used for sort batch scan records. */
+#define AZ_SORT_BATCH_SCAN_RECORDS 4U
 
 /** @brief Constant used for copy buffer. */
-#define AZ_COPY_BUFFER 4096U
+#define AZ_COPY_BUFFER 1024U
 
 /** @brief Constant used for source sample bytes. */
 #define AZ_SOURCE_SAMPLE_BYTES 256U
@@ -1159,21 +1160,29 @@ static void az_build_category_ranks(
     for(uint16_t i = 0; i < count; i++) ranks[categories[i].id] = (uint8_t)i;
 }
 
-/** @brief Chunked record storage used by the fast figure sorter. */
+/** @brief Minimal resident key used by the fast figure sorter. */
 typedef struct {
-    AzIndexFigureRecord** chunks; /**< Dynamically sized table of independently allocated record slabs. */
-    uint16_t chunk_count; /**< Number of allocated slabs. */
+    uint8_t id[8]; /**< Figure identifier used as the stable sort tie-breaker. */
+    char name[AZ_NAME_MAX]; /**< Figure name used for case-insensitive ordering. */
+    uint32_t source_ordinal; /**< Original fixed-record ordinal in amiibo.raw.tmp. */
+} AzFigureSortKey;
+
+/** @brief Chunked sort-key storage plus a compact movable ordering vector. */
+typedef struct {
+    AzFigureSortKey** chunks; /**< Independently allocated key slabs; keys never move while sorting. */
+    uint16_t* order; /**< Logical output order; entries are key-slot indices. */
+    uint16_t chunk_count; /**< Number of allocated key slabs. */
     uint16_t chunk_slots; /**< Number of pointer-table entries available. */
-    uint32_t capacity; /**< Total number of records that fit in allocated slabs. */
+    uint32_t capacity; /**< Total number of sort keys that fit in allocated slabs. */
 } AzFigureBatch;
 
 /**
- * @brief Return a record in a chunked figure batch.
- * @param batch Batch containing the record.
- * @param index Logical record index.
- * @return Pointer to the requested record, or NULL when the index is outside the batch capacity.
+ * @brief Return a sort key in a chunked figure batch.
+ * @param batch Batch containing the key.
+ * @param index Stable key-slot index.
+ * @return Pointer to the requested key, or NULL when the index is outside the batch capacity.
  */
-static AzIndexFigureRecord* az_figure_batch_at(AzFigureBatch* batch, uint32_t index) {
+static AzFigureSortKey* az_figure_batch_at(AzFigureBatch* batch, uint32_t index) {
     if(!batch || index >= batch->capacity) return NULL;
     uint32_t chunk = index / AZ_SORT_BATCH_CHUNK_RECORDS;
     uint32_t offset = index % AZ_SORT_BATCH_CHUNK_RECORDS;
@@ -1182,12 +1191,12 @@ static AzIndexFigureRecord* az_figure_batch_at(AzFigureBatch* batch, uint32_t in
 }
 
 /**
- * @brief Return a const record in a chunked figure batch.
- * @param batch Batch containing the record.
- * @param index Logical record index.
- * @return Pointer to the requested record, or NULL when the index is outside the batch capacity.
+ * @brief Return a const sort key in a chunked figure batch.
+ * @param batch Batch containing the key.
+ * @param index Stable key-slot index.
+ * @return Pointer to the requested key, or NULL when the index is outside the batch capacity.
  */
-static const AzIndexFigureRecord* az_figure_batch_at_const(
+static const AzFigureSortKey* az_figure_batch_at_const(
     const AzFigureBatch* batch,
     uint32_t index) {
     if(!batch || index >= batch->capacity) return NULL;
@@ -1198,7 +1207,7 @@ static const AzIndexFigureRecord* az_figure_batch_at_const(
 }
 
 /**
- * @brief Release all slabs owned by a chunked figure batch.
+ * @brief Release all slabs and the compact ordering vector owned by a figure batch.
  * @param batch Batch to clear.
  */
 static void az_figure_batch_free(AzFigureBatch* batch) {
@@ -1208,17 +1217,40 @@ static void az_figure_batch_free(AzFigureBatch* batch) {
         batch->chunks[i] = NULL;
     }
     free(batch->chunks);
+    free(batch->order);
     batch->chunks = NULL;
+    batch->order = NULL;
     batch->chunk_count = 0U;
     batch->chunk_slots = 0U;
     batch->capacity = 0U;
 }
 
 /**
- * @brief Grow a chunked figure batch while preserving heap headroom.
+ * @brief Test both total free heap and the largest contiguous free block before malloc/calloc.
+ *
+ * Flipper's allocator aborts on OOM instead of returning NULL, so total free bytes are not enough:
+ * fragmented free space must contain one block large enough for the requested payload plus allocator
+ * metadata/alignment.
+ */
+static bool az_sort_heap_can_allocate(size_t payload, size_t reserve) {
+    if(payload == 0U) return false;
+    size_t free_heap = memmgr_get_free_heap();
+    if(free_heap <= reserve || free_heap - reserve < payload + AZ_SORT_ALLOC_BLOCK_GUARD) {
+        return false;
+    }
+    size_t max_block = memmgr_heap_get_max_free_block();
+    return max_block >= payload + AZ_SORT_ALLOC_BLOCK_GUARD;
+}
+
+/**
+ * @brief Grow a chunked sort-key batch while preserving heap headroom.
+ *
+ * Full AzIndexFigureRecord objects remain in amiibo.raw.tmp. Only the fields needed for ordering
+ * are resident here, and heap sort moves uint16_t order entries rather than 112-byte records.
  * @param batch Batch to grow.
- * @param target_capacity Desired record capacity.
- * @return Number of records available after growth.
+ * @param required_capacity Minimum capacity needed for the largest category.
+ * @param target_capacity Preferred capacity used to group multiple categories per source scan.
+ * @return Number of sort keys available after growth.
  */
 static uint32_t az_figure_batch_allocate(
     AzFigureBatch* batch,
@@ -1228,26 +1260,41 @@ static uint32_t az_figure_batch_allocate(
     memset(batch, 0, sizeof(*batch));
 
     if(target_capacity < required_capacity) target_capacity = required_capacity;
-    if(target_capacity == 0U) return 0U;
+    if(target_capacity == 0U || target_capacity > UINT16_MAX) return 0U;
 
     const uint32_t chunk_slots32 =
         (target_capacity + AZ_SORT_BATCH_CHUNK_RECORDS - 1U) / AZ_SORT_BATCH_CHUNK_RECORDS;
     if(chunk_slots32 == 0U || chunk_slots32 > UINT16_MAX) return 0U;
 
+    size_t chunk_table_bytes = (size_t)chunk_slots32 * sizeof(*batch->chunks);
+    if(!az_sort_heap_can_allocate(chunk_table_bytes, AZ_SORT_HEAP_MIN_RESERVE)) return 0U;
     batch->chunks = calloc((size_t)chunk_slots32, sizeof(*batch->chunks));
     if(!batch->chunks) return 0U;
     batch->chunk_slots = (uint16_t)chunk_slots32;
 
+    /* Allocate the only contiguous sort structure first. At the normal 512-record target this is
+     * just 1024 bytes on Flipper, so fragmentation is far less likely to block it than a record
+     * array. The key payload itself is deliberately slabbed below. */
+    size_t order_bytes = (size_t)target_capacity * sizeof(*batch->order);
+    if(!az_sort_heap_can_allocate(order_bytes, AZ_SORT_HEAP_MIN_RESERVE)) {
+        az_figure_batch_free(batch);
+        return 0U;
+    }
+    batch->order = malloc(order_bytes);
+    if(!batch->order) {
+        az_figure_batch_free(batch);
+        return 0U;
+    }
+
     const size_t chunk_bytes =
-        (size_t)AZ_SORT_BATCH_CHUNK_RECORDS * sizeof(AzIndexFigureRecord);
+        (size_t)AZ_SORT_BATCH_CHUNK_RECORDS * sizeof(AzFigureSortKey);
     while(batch->capacity < target_capacity && batch->chunk_count < batch->chunk_slots) {
         const size_t reserve = batch->capacity < required_capacity ?
                                    AZ_SORT_HEAP_MIN_RESERVE :
                                    AZ_SORT_HEAP_PREFERRED_RESERVE;
-        const size_t free_heap = memmgr_get_free_heap();
-        if(free_heap <= reserve || free_heap - reserve < chunk_bytes) break;
+        if(!az_sort_heap_can_allocate(chunk_bytes, reserve)) break;
 
-        AzIndexFigureRecord* chunk = malloc(chunk_bytes);
+        AzFigureSortKey* chunk = malloc(chunk_bytes);
         if(!chunk) break;
 
         batch->chunks[batch->chunk_count++] = chunk;
@@ -1255,105 +1302,118 @@ static uint32_t az_figure_batch_allocate(
     }
 
     if(batch->capacity > target_capacity) batch->capacity = target_capacity;
+    for(uint32_t i = 0U; i < batch->capacity; i++) batch->order[i] = (uint16_t)i;
     return batch->capacity;
 }
 
-/**
- * @brief Swap two logical records in a chunked figure batch.
- * @param batch Batch containing the records.
- * @param left_index First logical index.
- * @param right_index Second logical index.
- */
-static void az_figure_batch_swap(
+/** @brief Compare two resident sort keys using the final figure ordering. */
+static int az_figure_sort_key_compare(const AzFigureSortKey* left, const AzFigureSortKey* right) {
+    if(!left || !right) return left ? 1 : right ? -1 : 0;
+    int by_name = az_compare_nocase(left->name, right->name);
+    if(by_name) return by_name;
+    int by_id = memcmp(left->id, right->id, sizeof(left->id));
+    return by_id < 0 ? -1 : by_id > 0 ? 1 : 0;
+}
+
+/** @brief Swap two logical output positions without moving the resident sort keys. */
+static void az_figure_batch_swap_order(
     AzFigureBatch* batch,
     uint32_t left_index,
     uint32_t right_index) {
-    if(left_index == right_index) return;
-    AzIndexFigureRecord* left = az_figure_batch_at(batch, left_index);
-    AzIndexFigureRecord* right = az_figure_batch_at(batch, right_index);
-    if(!left || !right) return;
-    AzIndexFigureRecord temporary = *left;
-    *left = *right;
-    *right = temporary;
+    if(!batch || !batch->order || left_index == right_index ||
+       left_index >= batch->capacity || right_index >= batch->capacity) {
+        return;
+    }
+    uint16_t temporary = batch->order[left_index];
+    batch->order[left_index] = batch->order[right_index];
+    batch->order[right_index] = temporary;
 }
 
 /**
- * @brief Restore heap ordering within one logical category range in a chunked batch.
- * @param batch Batch containing the category.
- * @param base Logical index of the category's first record.
- * @param count Number of records in the category.
- * @param root Heap node index relative to the category start.
+ * @brief Restore heap ordering within one logical category range by moving only uint16_t indices.
  */
 static void az_figure_batch_heap_sift_down(
     AzFigureBatch* batch,
     uint32_t base,
     uint32_t count,
     uint32_t root) {
+    if(!batch || !batch->order) return;
     while(count > 1U && root <= (count - 2U) / 2U) {
         uint32_t child = root * 2U + 1U;
-        const AzIndexFigureRecord* child_record = az_figure_batch_at_const(batch, base + child);
+        const AzFigureSortKey* child_record =
+            az_figure_batch_at_const(batch, batch->order[base + child]);
         if(child + 1U < count) {
-            const AzIndexFigureRecord* right_record =
-                az_figure_batch_at_const(batch, base + child + 1U);
+            const AzFigureSortKey* right_record =
+                az_figure_batch_at_const(batch, batch->order[base + child + 1U]);
             if(child_record && right_record &&
-               az_figure_compare(&child_record->figure, &right_record->figure) < 0) {
+               az_figure_sort_key_compare(child_record, right_record) < 0) {
                 child++;
                 child_record = right_record;
             }
         }
 
-        const AzIndexFigureRecord* root_record = az_figure_batch_at_const(batch, base + root);
+        const AzFigureSortKey* root_record =
+            az_figure_batch_at_const(batch, batch->order[base + root]);
         if(!root_record || !child_record ||
-           az_figure_compare(&root_record->figure, &child_record->figure) >= 0) {
+           az_figure_sort_key_compare(root_record, child_record) >= 0) {
             break;
         }
-        az_figure_batch_swap(batch, base + root, base + child);
+        az_figure_batch_swap_order(batch, base + root, base + child);
         root = child;
     }
 }
 
-/**
- * @brief Sort one category held in a chunked figure batch.
- * @param batch Batch containing the category.
- * @param base Logical index of the category's first record.
- * @param count Number of records in the category.
- */
+/** @brief Sort one category by reordering only the compact index vector. */
 static void az_sort_category_batch(AzFigureBatch* batch, uint32_t base, uint32_t count) {
-    if(!batch || count < 2U) return;
+    if(!batch || !batch->order || count < 2U) return;
     for(uint32_t start = count / 2U; start > 0U; start--) {
         az_figure_batch_heap_sift_down(batch, base, count, start - 1U);
     }
     for(uint32_t end = count; end > 1U; end--) {
-        az_figure_batch_swap(batch, base, base + end - 1U);
+        az_figure_batch_swap_order(batch, base, base + end - 1U);
         az_figure_batch_heap_sift_down(batch, base, end - 1U, 0U);
     }
 }
 
 /**
- * @brief Write logical records from a chunked figure batch to the destination index.
- * @param destination Destination index file.
- * @param batch Batch containing records to write.
- * @param count Number of logical records to write.
- * @return true on success; false if the operation cannot be completed.
+ * @brief Materialize full figure records from the raw file in compact-order-vector order.
+ *
+ * Random reads are intentionally traded for heap headroom. The existing small scan allocation is
+ * reused as the output staging buffer, so the pointer/index sort adds no second record-sized buffer.
  */
-static bool az_write_figure_batch(File* destination, const AzFigureBatch* batch, uint32_t count) {
-    if(!destination || !batch || count > batch->capacity) return false;
+static bool az_write_figure_batch(
+    File* source,
+    File* destination,
+    const AzFigureBatch* batch,
+    uint32_t count,
+    AzIndexFigureRecord* staging,
+    uint32_t staging_capacity) {
+    if(!source || !destination || !batch || !batch->order || !staging ||
+       staging_capacity == 0U || count > batch->capacity) {
+        return false;
+    }
 
-    uint32_t written = 0U;
-    while(written < count) {
-        uint32_t chunk_index = written / AZ_SORT_BATCH_CHUNK_RECORDS;
-        uint32_t chunk_offset = written % AZ_SORT_BATCH_CHUNK_RECORDS;
-        if(chunk_index >= batch->chunk_count || !batch->chunks[chunk_index]) return false;
+    uint32_t buffered = 0U;
+    for(uint32_t output_index = 0U; output_index < count; output_index++) {
+        uint16_t key_index = batch->order[output_index];
+        const AzFigureSortKey* key = az_figure_batch_at_const(batch, key_index);
+        if(!key) return false;
 
-        uint32_t available = AZ_SORT_BATCH_CHUNK_RECORDS - chunk_offset;
-        uint32_t remaining = count - written;
-        uint32_t record_count = remaining < available ? remaining : available;
-        size_t bytes = (size_t)record_count * sizeof(AzIndexFigureRecord);
-        if(storage_file_write(
-               destination, batch->chunks[chunk_index] + chunk_offset, bytes) != bytes) {
+        uint64_t source_offset64 =
+            (uint64_t)key->source_ordinal * (uint64_t)sizeof(AzIndexFigureRecord);
+        if(source_offset64 > UINT32_MAX ||
+           !storage_file_seek(source, (uint32_t)source_offset64, true) ||
+           storage_file_read(source, &staging[buffered], sizeof(AzIndexFigureRecord)) !=
+               sizeof(AzIndexFigureRecord)) {
             return false;
         }
-        written += record_count;
+        buffered++;
+
+        if(buffered == staging_capacity || output_index + 1U == count) {
+            size_t bytes = (size_t)buffered * sizeof(AzIndexFigureRecord);
+            if(storage_file_write(destination, staging, bytes) != bytes) return false;
+            buffered = 0U;
+        }
     }
     return true;
 }
@@ -1393,23 +1453,20 @@ static bool az_write_sorted_figure_batches(
     for(uint16_t i = 0; i < category_count; i++) {
         if(categories[i].count > largest_category) largest_category = categories[i].count;
     }
-    if(largest_category == 0U || largest_category > figure_count) return false;
+    if(largest_category == 0U || largest_category > figure_count || largest_category > UINT16_MAX) {
+        return false;
+    }
 
-    /* Reserve the storage object's heap before consuming the rest with record slabs. */
+    /* Reserve the storage object's heap before consuming the rest with sort-key slabs. */
     File* source = storage_file_alloc(storage);
     if(!source || !storage_file_open(source, AZ_INDEX_RAW, FSAM_READ, FSOM_OPEN_EXISTING)) {
         if(source) storage_file_free(source);
         return false;
     }
 
-    AzIndexFigureRecord* scan =
-        malloc((size_t)AZ_SORT_BATCH_SCAN_RECORDS * sizeof(AzIndexFigureRecord));
-    if(!scan) {
-        storage_file_close(source);
-        storage_file_free(source);
-        if(out_allocation_failed) *out_allocation_failed = true;
-        return false;
-    }
+    /* The app stack is reserved at launch, so use it for the small scan/staging buffer rather than
+     * consuming another fragmented heap block during the sort phase. */
+    AzIndexFigureRecord scan[AZ_SORT_BATCH_SCAN_RECORDS];
 
     /* Prime the storage read path before the slabs consume the remaining heap. */
     uint32_t prime_count = figure_count;
@@ -1417,7 +1474,6 @@ static bool az_write_sorted_figure_batches(
     size_t prime_bytes = (size_t)prime_count * sizeof(AzIndexFigureRecord);
     if(storage_file_read(source, scan, prime_bytes) != prime_bytes ||
        !storage_file_seek(source, 0U, true)) {
-        free(scan);
         storage_file_close(source);
         storage_file_free(source);
         return false;
@@ -1426,13 +1482,13 @@ static bool az_write_sorted_figure_batches(
     uint32_t target_capacity = AZ_SORT_BATCH_TARGET_RECORDS;
     if(target_capacity < largest_category) target_capacity = largest_category;
     if(target_capacity > figure_count) target_capacity = figure_count;
+    if(target_capacity > UINT16_MAX) target_capacity = UINT16_MAX;
 
     AzFigureBatch batch;
     uint32_t capacity =
         az_figure_batch_allocate(&batch, largest_category, target_capacity);
     if(capacity < largest_category) {
         az_figure_batch_free(&batch);
-        free(scan);
         storage_file_close(source);
         storage_file_free(source);
         if(out_allocation_failed) *out_allocation_failed = true;
@@ -1467,6 +1523,10 @@ static bool az_write_sorted_figure_batches(
             break;
         }
 
+        /* Reset the order vector for the logical slots used by this batch. The key slabs themselves
+         * are overwritten in place during the scan and never moved during sorting. */
+        for(uint32_t i = 0U; i < batch_count; i++) batch.order[i] = (uint16_t)i;
+
         if(!storage_file_seek(source, 0U, true)) {
             ok = false;
             break;
@@ -1489,13 +1549,18 @@ static bool az_write_sorted_figure_batches(
                     ok = false;
                     break;
                 }
-                AzIndexFigureRecord* destination_record =
+                AzFigureSortKey* destination_key =
                     az_figure_batch_at(&batch, category_base[rank] + filled);
-                if(!destination_record) {
+                if(!destination_key) {
                     ok = false;
                     break;
                 }
-                *destination_record = scan[i];
+                memcpy(destination_key->id, scan[i].figure.id, sizeof(destination_key->id));
+                az_str_copy(
+                    destination_key->name,
+                    sizeof(destination_key->name),
+                    scan[i].figure.name);
+                destination_key->source_ordinal = scanned + i;
                 category_filled[rank] = (uint16_t)(filled + 1U);
             }
             scanned += chunk;
@@ -1508,7 +1573,15 @@ static bool az_write_sorted_figure_batches(
             }
             az_sort_category_batch(&batch, category_base[rank], categories[rank].count);
         }
-        if(ok) ok = az_write_figure_batch(destination, &batch, batch_count);
+        if(ok) {
+            ok = az_write_figure_batch(
+                source,
+                destination,
+                &batch,
+                batch_count,
+                scan,
+                AZ_SORT_BATCH_SCAN_RECORDS);
+        }
         if(!ok) break;
 
         emitted += batch_count;
@@ -1519,7 +1592,6 @@ static bool az_write_sorted_figure_batches(
     }
 
     az_figure_batch_free(&batch);
-    free(scan);
     storage_file_close(source);
     storage_file_free(source);
     return ok && emitted == figure_count;
@@ -1586,9 +1658,8 @@ static bool az_create_sorted_runs(
     bool ok = source && destination &&
               storage_file_open(source, AZ_INDEX_RAW, FSAM_READ, FSOM_OPEN_EXISTING) &&
               storage_file_open(destination, AZ_INDEX_SORT_RUNS, FSAM_WRITE, FSOM_CREATE_ALWAYS);
-    AzIndexFigureRecord* records =
-        ok ? malloc(AZ_SORT_RUN_RECORDS * sizeof(AzIndexFigureRecord)) : NULL;
-    if(!records) ok = false;
+    /* Keep the fallback's record run on the already-reserved app stack. */
+    AzIndexFigureRecord records[AZ_SORT_RUN_RECORDS];
 
     uint32_t processed = 0;
     while(ok && processed < figure_count) {
@@ -1608,7 +1679,6 @@ static bool az_create_sorted_runs(
         uint8_t percent = figure_count ? (uint8_t)(45U + az_progress_scale_u32(processed, figure_count, 8U)) : 53U;
         az_progress_emit(progress_callback, progress_context, AzDbProgressSorting, percent);
     }
-    free(records);
     if(source) {
         storage_file_close(source);
         storage_file_free(source);
@@ -1816,8 +1886,8 @@ static bool az_copy_file_bytes(
         if(source) storage_file_free(source);
         return false;
     }
-    uint8_t* buffer = malloc(AZ_COPY_BUFFER);
-    bool ok = buffer != NULL;
+    uint8_t buffer[AZ_COPY_BUFFER];
+    bool ok = true;
     uint32_t copied = 0;
     while(ok && copied < byte_count) {
         uint32_t remaining = byte_count - copied;
@@ -1834,7 +1904,6 @@ static bool az_copy_file_bytes(
                               end_percent;
         az_progress_emit(progress_callback, progress_context, AzDbProgressSorting, percent);
     }
-    free(buffer);
     storage_file_close(source);
     storage_file_free(source);
     return ok;

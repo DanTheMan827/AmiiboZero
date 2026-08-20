@@ -3,6 +3,7 @@
  * @brief Category-first 128x64 user interface, navigation, emulation controls, and readable text rendering.
  */
 #include <furi/core/memmgr.h>
+#include <furi/core/memmgr_heap.h>
 
 #include "./amiibo_zero.h"
 #include "./amiibo_db.h"
@@ -46,16 +47,15 @@ static void az_manual_id_done(void* context);
 /** Draw the heap counter last into the active app canvas without creating another GUI viewport. */
 static void az_memory_overlay_draw(Canvas* canvas) {
     if(!canvas) return;
-    size_t total = memmgr_get_total_heap();
     size_t free_heap = memmgr_get_free_heap();
-    size_t used = total >= free_heap ? total - free_heap : 0U;
+    size_t max_block = memmgr_heap_get_max_free_block();
     char text[24];
     snprintf(
         text,
         sizeof(text),
         "%lu/%luk",
-        (unsigned long)(used / 1024U),
-        (unsigned long)(total / 1024U));
+        (unsigned long)(free_heap / 1024U),
+        (unsigned long)(max_block / 1024U));
     canvas_set_font(canvas, FontSecondary);
     uint8_t width = canvas_string_width(canvas, text);
     uint8_t x = width + 2U < 128U ? (uint8_t)(128U - width - 1U) : 0U;

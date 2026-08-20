@@ -76,7 +76,7 @@ Index construction follows the supplied database implementation. `amiibo.json` i
 
 The custom UI is organized as full C++ screen classes. Every `src/ui/<screen>.h/.cpp` pair defines one class derived from `AzUiScreen`; the class owns both drawing and input behavior for that screen. `src/amiibo_ui.cpp` owns the ViewDispatcher, shared actions/navigation, and selects the active screen object. `ui_common.*` contains shared drawing helpers. The screen sources are normal translation units rather than macro include fragments.
 
-A bottom-right heap usage overlay is enabled by default for debugging. It is compiled behind `#ifdef AZ_DEBUG_MEMORY_OVERLAY` and is drawn last in the same canvas callback as the active AmiiboZero screen, so it does not replace or clear the underlying fullscreen view. Define `AZ_DISABLE_MEMORY_OVERLAY` to omit it.
+A bottom-right heap overlay is enabled by default for debugging and displays `free heap / largest contiguous free block` in KiB. It is compiled behind `#ifdef AZ_DEBUG_MEMORY_OVERLAY` and is drawn last in the same canvas callback as the active AmiiboZero screen, so it does not replace or clear the underlying fullscreen view. Define `AZ_DISABLE_MEMORY_OVERLAY` to omit it.
 
 ### Home
 
