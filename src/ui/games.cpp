@@ -50,13 +50,11 @@ bool AzGamesScreen::input(AmiiboZeroApp* app, const InputEvent* event) const {
     } else if(event->key == InputKeyDown) {
         if(app->detail_scroll < UINT16_MAX) app->detail_scroll++;
     } else if(event->key == InputKeyLeft && app->game_count) {
-        if(app->selection > 0U) app->selection--;
+        az_ui_move_selection(app, -1, app->game_count);
         app->detail_scroll = 0U;
-        app->animation = 0U;
     } else if(event->key == InputKeyRight && app->game_count) {
-        if(app->selection + 1U < app->game_count) app->selection++;
+        az_ui_move_selection(app, 1, app->game_count);
         app->detail_scroll = 0U;
-        app->animation = 0U;
     }
     return true;
 

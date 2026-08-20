@@ -46,10 +46,13 @@
 
 /** @brief Constant used for source sample bytes. */
 #define AZ_SOURCE_SAMPLE_BYTES 256U
+
+/** @brief Payload bytes in each pooled variable-length name slab. */
+#define AZ_NAME_POOL_CHUNK_BYTES 256U
 /** @brief Constant used for index magic. */
 #define AZ_INDEX_MAGIC "AZIDX34"
 /** @brief Constant used for index version. */
-#define AZ_INDEX_VERSION 10U
+#define AZ_INDEX_VERSION 11U
 
 /** @brief Remove the active index and all index-build artifacts. */
 void az_db_remove_index_files(Storage* storage) {
@@ -73,7 +76,7 @@ typedef struct {
     char magic[8]; /**< Index format signature. */
     uint16_t version; /**< Binary index format version. */
     uint16_t header_size; /**< Serialized header size in bytes. */
-    uint16_t category_record_size; /**< Serialized category-record size in bytes. */
+    uint16_t category_record_size; /**< Serialized fixed category-prefix size; names follow variably. */
     uint16_t figure_record_size; /**< Serialized figure-record size in bytes. */
     uint16_t game_record_size; /**< Serialized game-reference-record size in bytes. */
     uint16_t reserved0; /**< Reserved header field. */
@@ -88,11 +91,43 @@ typedef struct {
     uint32_t games_offset; /**< Byte offset of the game-reference section. */
 } AzIndexHeader;
 
-/** @brief Indexed category record with the ordinal of its first figure. */
+/** @brief Fixed prefix for one variable-length category record on disk. */
 typedef struct {
-    AzCategory category; /**< Serialized category metadata. */
+    uint8_t id; /**< Amiibo series/category byte. */
+    uint8_t name_length; /**< Number of following category-name bytes, excluding NUL. */
+    uint16_t count; /**< Number of figures belonging to the category. */
+    uint32_t first_figure; /**< Ordinal of the first figure in this category. */
+} AzIndexCategoryPrefix;
+
+_Static_assert(sizeof(AzIndexCategoryPrefix) == 8U, "category prefix must stay 8 bytes");
+
+/** @brief Decoded category record used only while reading the variable-length index section. */
+typedef struct {
+    AzCategory category; /**< Category metadata expanded for the small visible UI window. */
     uint32_t first_figure; /**< Ordinal of the first figure in this category. */
 } AzIndexCategoryRecord;
+
+/** @brief One slab in a small pooled allocator for exact-length names. */
+typedef struct AzNamePoolChunk {
+    struct AzNamePoolChunk* next; /**< Next independently allocated slab. */
+    uint16_t used; /**< Payload bytes consumed in this slab. */
+    char data[AZ_NAME_POOL_CHUNK_BYTES]; /**< Packed NUL-terminated names. */
+} AzNamePoolChunk;
+
+/** @brief Reusable variable-length string pool. */
+typedef struct {
+    AzNamePoolChunk* head; /**< First allocated slab. */
+    AzNamePoolChunk* tail; /**< Last allocated slab, used when appending. */
+    AzNamePoolChunk* active; /**< Current slab used while filling/resetting a batch. */
+} AzNamePool;
+
+/** @brief Compact category descriptor used only while building the index. */
+typedef struct {
+    const char* name; /**< Exact-length name stored in the category name pool. */
+    uint16_t count; /**< Number of figures in this category. */
+    uint8_t id; /**< Amiibo series/category byte. */
+    uint8_t name_length; /**< Name length in bytes, excluding NUL. */
+} AzBuildCategory;
 
 /** @brief Serialized figure record stored in the database index. */
 typedef struct {
@@ -135,7 +170,8 @@ typedef struct {
 typedef struct {
     AzScanControl control; /**< Shared streaming-scan control state. */
     File* raw_file; /**< Temporary destination for unsorted figure records. */
-    AzCategory* categories; /**< In-memory category table. */
+    AzBuildCategory* categories; /**< Compact in-memory category descriptor table. */
+    AzNamePool* category_names; /**< Variable-length category-name storage. */
     uint16_t category_capacity; /**< Capacity of the category table. */
     uint16_t* category_count; /**< Pointer to the current category count. */
     AzFigure current; /**< Figure record currently being assembled. */
@@ -177,6 +213,78 @@ typedef struct {
     bool saw_usage; /**< Whether the current game contained an explicit usage section. */
     AzStringDecoder decoder; /**< Incremental JSON string decoder state. */
 } AzGamesRangeContext;
+
+/** @brief Check total and contiguous heap before an allocation that Flipper would otherwise abort. */
+static bool az_heap_can_allocate(size_t payload, size_t reserve) {
+    if(payload == 0U) return false;
+    size_t free_heap = memmgr_get_free_heap();
+    if(free_heap <= reserve || free_heap - reserve < payload + AZ_SORT_ALLOC_BLOCK_GUARD) {
+        return false;
+    }
+    return memmgr_heap_get_max_free_block() >= payload + AZ_SORT_ALLOC_BLOCK_GUARD;
+}
+
+/** @brief Release every slab owned by a variable-length name pool. */
+static void az_name_pool_free(AzNamePool* pool) {
+    if(!pool) return;
+    AzNamePoolChunk* chunk = pool->head;
+    while(chunk) {
+        AzNamePoolChunk* next = chunk->next;
+        free(chunk);
+        chunk = next;
+    }
+    memset(pool, 0, sizeof(*pool));
+}
+
+/** @brief Reuse already allocated name slabs for another figure-sort batch. */
+static void az_name_pool_reset(AzNamePool* pool) {
+    if(!pool) return;
+    for(AzNamePoolChunk* chunk = pool->head; chunk; chunk = chunk->next) chunk->used = 0U;
+    pool->active = pool->head;
+}
+
+/**
+ * @brief Store a string at its exact length in a small slab pool.
+ * @param reserve Heap bytes to preserve when a new slab is required.
+ * @return Stable NUL-terminated pointer owned by the pool, or NULL on allocation refusal.
+ */
+static const char* az_name_pool_store(
+    AzNamePool* pool,
+    const char* text,
+    uint8_t* out_length,
+    size_t reserve) {
+    if(out_length) *out_length = 0U;
+    if(!pool || !text) return NULL;
+
+    size_t length = strlen(text);
+    if(length > UINT8_MAX) length = UINT8_MAX;
+    size_t needed = length + 1U;
+    if(needed > AZ_NAME_POOL_CHUNK_BYTES) return NULL;
+
+    AzNamePoolChunk* chunk = pool->active ? pool->active : pool->head;
+    while(chunk && (size_t)chunk->used + needed > sizeof(chunk->data)) chunk = chunk->next;
+    if(!chunk) {
+        if(!az_heap_can_allocate(sizeof(AzNamePoolChunk), reserve)) return NULL;
+        chunk = malloc(sizeof(AzNamePoolChunk));
+        if(!chunk) return NULL;
+        chunk->next = NULL;
+        chunk->used = 0U;
+        if(pool->tail) {
+            pool->tail->next = chunk;
+        } else {
+            pool->head = chunk;
+        }
+        pool->tail = chunk;
+    }
+    pool->active = chunk;
+
+    char* stored = &chunk->data[chunk->used];
+    memcpy(stored, text, length);
+    stored[length] = '\0';
+    chunk->used = (uint16_t)(chunk->used + needed);
+    if(out_length) *out_length = (uint8_t)length;
+    return stored;
+}
 
 /**
  * @brief Convert an ASCII uppercase letter to lowercase.
@@ -696,11 +804,28 @@ static bool az_scan_json_range(
  * @param id Eight-byte Amiibo identifier.
  * @return Pointer to the requested object, or NULL when it is not available.
  */
-static AzCategory* az_find_category(AzCategory* categories, uint16_t count, uint8_t id) {
+static AzBuildCategory* az_find_category(
+    AzBuildCategory* categories,
+    uint16_t count,
+    uint8_t id) {
     for(uint16_t i = 0; i < count; i++) {
         if(categories[i].id == id) return &categories[i];
     }
     return NULL;
+}
+
+/** @brief Replace a build-category name with an exact-length pooled copy. */
+static bool az_set_category_name(
+    AzBuildCategory* category,
+    AzNamePool* names,
+    const char* name) {
+    if(!category || !names || !name) return false;
+    uint8_t length = 0U;
+    const char* stored = az_name_pool_store(names, name, &length, 0U);
+    if(!stored) return false;
+    category->name = stored;
+    category->name_length = length;
+    return true;
 }
 
 /**
@@ -708,19 +833,27 @@ static AzCategory* az_find_category(AzCategory* categories, uint16_t count, uint
  * @param categories Category record array.
  * @param capacity Maximum number of elements or bytes available.
  * @param count Number of records or elements.
+ * @param names Variable-length category-name pool.
  * @param id Eight-byte Amiibo identifier.
  * @return Pointer to the requested object, or NULL when it is not available.
  */
-static AzCategory* az_add_unknown_category(
-    AzCategory* categories,
+static AzBuildCategory* az_add_unknown_category(
+    AzBuildCategory* categories,
     uint16_t capacity,
     uint16_t* count,
+    AzNamePool* names,
     uint8_t id) {
-    if(!categories || !count || *count >= capacity) return NULL;
-    AzCategory* category = &categories[(*count)++];
+    if(!categories || !count || !names || *count >= capacity) return NULL;
+    AzBuildCategory* category = &categories[(*count)++];
     memset(category, 0, sizeof(*category));
     category->id = id;
-    snprintf(category->name, sizeof(category->name), "Series %02X", id);
+    char generated[16];
+    snprintf(generated, sizeof(generated), "Series %02X", id);
+    if(!az_set_category_name(category, names, generated)) {
+        (*count)--;
+        memset(category, 0, sizeof(*category));
+        return NULL;
+    }
     return category;
 }
 
@@ -730,8 +863,8 @@ static AzCategory* az_add_unknown_category(
  * @param right Right comparison operand.
  * @return A negative, zero, or positive value when the left operand sorts before, equal to, or after the right operand.
  */
-static int az_category_compare(const AzCategory* left, const AzCategory* right) {
-    int by_name = az_compare_nocase(left->name, right->name);
+static int az_category_compare(const AzBuildCategory* left, const AzBuildCategory* right) {
+    int by_name = az_compare_nocase(left->name ? left->name : "", right->name ? right->name : "");
     if(by_name) return by_name;
     return left->id < right->id ? -1 : left->id > right->id ? 1 : 0;
 }
@@ -741,9 +874,9 @@ static int az_category_compare(const AzCategory* left, const AzCategory* right) 
  * @param categories Category record array.
  * @param count Number of records or elements.
  */
-static void az_sort_categories(AzCategory* categories, uint16_t count) {
+static void az_sort_categories(AzBuildCategory* categories, uint16_t count) {
     for(uint16_t i = 1; i < count; i++) {
-        AzCategory current = categories[i];
+        AzBuildCategory current = categories[i];
         uint16_t j = i;
         while(j > 0 && az_category_compare(&categories[j - 1], &current) > 0) {
             categories[j] = categories[j - 1];
@@ -830,13 +963,14 @@ static void az_figure_build_event(lwjson_stream_parser_t* parser, lwjson_stream_
         const char* id_text = az_lw_key(parser, 0);
         uint8_t id = 0;
         if(id_text && az_parse_hex_byte(id_text, &id)) {
-            AzCategory* category =
+            AzBuildCategory* category =
                 az_find_category(context->categories, *context->category_count, id);
             if(!category) {
                 category = az_add_unknown_category(
                     context->categories,
                     context->category_capacity,
                     context->category_count,
+                    context->category_names,
                     id);
             }
             if(!category) {
@@ -844,9 +978,15 @@ static void az_figure_build_event(lwjson_stream_parser_t* parser, lwjson_stream_
                 context->control.stop = true;
                 return;
             }
+            /* Preserve category names up to the uint8_t serialized-length limit. */
+            char category_name[UINT8_MAX + 1U];
             az_copy_stream_string(
-                parser, category->name, sizeof(category->name), &context->decoder);
-            az_clean_field(category->name);
+                parser, category_name, sizeof(category_name), &context->decoder);
+            az_clean_field(category_name);
+            if(!az_set_category_name(category, context->category_names, category_name)) {
+                context->control.failed = true;
+                context->control.stop = true;
+            }
         }
         return;
     }
@@ -893,13 +1033,14 @@ static void az_figure_build_event(lwjson_stream_parser_t* parser, lwjson_stream_
                 sizeof(context->current.name),
                 context->current.id_hex);
         az_strip_v3_name_suffix(&context->current);
-        AzCategory* category = az_find_category(
+        AzBuildCategory* category = az_find_category(
             context->categories, *context->category_count, context->current.category);
         if(!category) {
             category = az_add_unknown_category(
                 context->categories,
                 context->category_capacity,
                 context->category_count,
+                context->category_names,
                 context->current.category);
         }
         if(!category) {
@@ -1047,29 +1188,50 @@ static bool az_stamp_equal(const AzSourceStamp* left, const AzSourceStamp* right
 static bool az_header_shape_valid(const AzIndexHeader* header) {
     return header && memcmp(header->magic, AZ_INDEX_MAGIC, sizeof(header->magic)) == 0 &&
            header->version == AZ_INDEX_VERSION && header->header_size == sizeof(AzIndexHeader) &&
-           header->category_record_size == sizeof(AzIndexCategoryRecord) &&
+           header->category_record_size == sizeof(AzIndexCategoryPrefix) &&
            header->figure_record_size == sizeof(AzIndexFigureRecord) &&
            header->game_record_size == sizeof(AzIndexGameRef);
 }
 
 /**
- * @brief Validate index section offsets and extents against the file size.
+ * @brief Validate variable category records plus the fixed figure/game extents.
+ * @param file Open index file positioned anywhere.
  * @param header Validated database index header.
  * @param file_size Size associated with file.
  * @return true when the tested condition is satisfied; false otherwise.
  */
-static bool az_header_layout_valid(const AzIndexHeader* header, uint64_t file_size) {
-    if(!az_header_shape_valid(header) || header->category_count > AZ_MAX_CATEGORIES) return false;
-    uint64_t categories_offset = sizeof(AzIndexHeader);
-    uint64_t figures_offset = categories_offset +
-                              (uint64_t)header->category_count * sizeof(AzIndexCategoryRecord);
-    uint64_t games_offset = figures_offset +
+static bool az_header_layout_valid(File* file, const AzIndexHeader* header, uint64_t file_size) {
+    if(!file || !az_header_shape_valid(header) || header->category_count > AZ_MAX_CATEGORIES)
+        return false;
+    if(header->categories_offset != sizeof(AzIndexHeader) ||
+       header->figures_offset < header->categories_offset) {
+        return false;
+    }
+
+    uint64_t games_offset = (uint64_t)header->figures_offset +
                             (uint64_t)header->figure_count * sizeof(AzIndexFigureRecord);
     uint64_t end_offset = games_offset +
                           (uint64_t)header->game_ref_count * sizeof(AzIndexGameRef);
-    return categories_offset == header->categories_offset &&
-           figures_offset == header->figures_offset && games_offset == header->games_offset &&
-           end_offset <= UINT32_MAX && end_offset <= file_size;
+    if(games_offset != header->games_offset || end_offset > UINT32_MAX || end_offset > file_size)
+        return false;
+
+    if(!storage_file_seek(file, header->categories_offset, true)) return false;
+    uint32_t cursor = header->categories_offset;
+    uint32_t expected_first = 0U;
+    for(uint16_t i = 0U; i < header->category_count; i++) {
+        if((uint64_t)cursor + sizeof(AzIndexCategoryPrefix) > header->figures_offset) return false;
+        AzIndexCategoryPrefix prefix;
+        if(!az_read_exact(file, &prefix, sizeof(prefix))) return false;
+        cursor += sizeof(prefix);
+        if((uint64_t)cursor + prefix.name_length > header->figures_offset ||
+           prefix.first_figure != expected_first) {
+            return false;
+        }
+        expected_first += prefix.count;
+        cursor += prefix.name_length;
+        if(!storage_file_seek(file, cursor, true)) return false;
+    }
+    return cursor == header->figures_offset && expected_first == header->figure_count;
 }
 
 /**
@@ -1099,7 +1261,7 @@ static bool az_read_index_header(Storage* storage, AzIndexHeader* header) {
     }
     uint64_t file_size = storage_file_size(file);
     bool ok = az_read_exact(file, header, sizeof(*header)) &&
-              az_header_layout_valid(header, file_size);
+              az_header_layout_valid(file, header, file_size);
     storage_file_close(file);
     storage_file_free(file);
     return ok;
@@ -1153,7 +1315,7 @@ static bool az_index_current(
  * @param ranks Category sort-rank lookup table.
  */
 static void az_build_category_ranks(
-    const AzCategory* categories,
+    const AzBuildCategory* categories,
     uint16_t count,
     uint8_t ranks[256]) {
     memset(ranks, 0xFF, 256U);
@@ -1162,9 +1324,10 @@ static void az_build_category_ranks(
 
 /** @brief Minimal resident key used by the fast figure sorter. */
 typedef struct {
-    uint8_t id[8]; /**< Figure identifier used as the stable sort tie-breaker. */
-    char name[AZ_NAME_MAX]; /**< Figure name used for case-insensitive ordering. */
+    const char* name; /**< Exact-length figure name stored in the batch name pool. */
     uint32_t source_ordinal; /**< Original fixed-record ordinal in amiibo.raw.tmp. */
+    uint8_t id[8]; /**< Figure identifier used as the stable sort tie-breaker. */
+    uint8_t name_length; /**< Figure-name length in bytes, excluding NUL. */
 } AzFigureSortKey;
 
 /** @brief Chunked sort-key storage plus a compact movable ordering vector. */
@@ -1174,6 +1337,7 @@ typedef struct {
     uint16_t chunk_count; /**< Number of allocated key slabs. */
     uint16_t chunk_slots; /**< Number of pointer-table entries available. */
     uint32_t capacity; /**< Total number of sort keys that fit in allocated slabs. */
+    AzNamePool names; /**< Variable-length figure names for the current batch. */
 } AzFigureBatch;
 
 /**
@@ -1216,6 +1380,7 @@ static void az_figure_batch_free(AzFigureBatch* batch) {
         free(batch->chunks[i]);
         batch->chunks[i] = NULL;
     }
+    az_name_pool_free(&batch->names);
     free(batch->chunks);
     free(batch->order);
     batch->chunks = NULL;
@@ -1223,23 +1388,6 @@ static void az_figure_batch_free(AzFigureBatch* batch) {
     batch->chunk_count = 0U;
     batch->chunk_slots = 0U;
     batch->capacity = 0U;
-}
-
-/**
- * @brief Test both total free heap and the largest contiguous free block before malloc/calloc.
- *
- * Flipper's allocator aborts on OOM instead of returning NULL, so total free bytes are not enough:
- * fragmented free space must contain one block large enough for the requested payload plus allocator
- * metadata/alignment.
- */
-static bool az_sort_heap_can_allocate(size_t payload, size_t reserve) {
-    if(payload == 0U) return false;
-    size_t free_heap = memmgr_get_free_heap();
-    if(free_heap <= reserve || free_heap - reserve < payload + AZ_SORT_ALLOC_BLOCK_GUARD) {
-        return false;
-    }
-    size_t max_block = memmgr_heap_get_max_free_block();
-    return max_block >= payload + AZ_SORT_ALLOC_BLOCK_GUARD;
 }
 
 /**
@@ -1267,7 +1415,7 @@ static uint32_t az_figure_batch_allocate(
     if(chunk_slots32 == 0U || chunk_slots32 > UINT16_MAX) return 0U;
 
     size_t chunk_table_bytes = (size_t)chunk_slots32 * sizeof(*batch->chunks);
-    if(!az_sort_heap_can_allocate(chunk_table_bytes, AZ_SORT_HEAP_MIN_RESERVE)) return 0U;
+    if(!az_heap_can_allocate(chunk_table_bytes, AZ_SORT_HEAP_MIN_RESERVE)) return 0U;
     batch->chunks = calloc((size_t)chunk_slots32, sizeof(*batch->chunks));
     if(!batch->chunks) return 0U;
     batch->chunk_slots = (uint16_t)chunk_slots32;
@@ -1276,7 +1424,7 @@ static uint32_t az_figure_batch_allocate(
      * just 1024 bytes on Flipper, so fragmentation is far less likely to block it than a record
      * array. The key payload itself is deliberately slabbed below. */
     size_t order_bytes = (size_t)target_capacity * sizeof(*batch->order);
-    if(!az_sort_heap_can_allocate(order_bytes, AZ_SORT_HEAP_MIN_RESERVE)) {
+    if(!az_heap_can_allocate(order_bytes, AZ_SORT_HEAP_MIN_RESERVE)) {
         az_figure_batch_free(batch);
         return 0U;
     }
@@ -1292,7 +1440,7 @@ static uint32_t az_figure_batch_allocate(
         const size_t reserve = batch->capacity < required_capacity ?
                                    AZ_SORT_HEAP_MIN_RESERVE :
                                    AZ_SORT_HEAP_PREFERRED_RESERVE;
-        if(!az_sort_heap_can_allocate(chunk_bytes, reserve)) break;
+        if(!az_heap_can_allocate(chunk_bytes, reserve)) break;
 
         AzFigureSortKey* chunk = malloc(chunk_bytes);
         if(!chunk) break;
@@ -1422,7 +1570,7 @@ static bool az_write_figure_batch(
  * @brief Sort figure records in bounded batches and write them to the destination index.
  * @param storage Storage service used for file operations.
  * @param destination Destination object or buffer.
- * @param categories Category record array.
+ * @param category_counts Per-category figure counts in display order.
  * @param category_count Number of category entries.
  * @param figure_count Number of figure entries.
  * @param ranks Category sort-rank lookup table.
@@ -1434,7 +1582,7 @@ static bool az_write_figure_batch(
 static bool az_write_sorted_figure_batches(
     Storage* storage,
     File* destination,
-    const AzCategory* categories,
+    const uint16_t* category_counts,
     uint16_t category_count,
     uint32_t figure_count,
     const uint8_t ranks[256],
@@ -1442,7 +1590,7 @@ static bool az_write_sorted_figure_batches(
     void* progress_context,
     bool* out_allocation_failed) {
     if(out_allocation_failed) *out_allocation_failed = false;
-    if(!storage || !destination || !categories || !ranks) return false;
+    if(!storage || !destination || !category_counts || !ranks) return false;
     az_progress_emit(progress_callback, progress_context, AzDbProgressSorting, 45U);
     if(figure_count == 0U) {
         az_progress_emit(progress_callback, progress_context, AzDbProgressSorting, 68U);
@@ -1451,7 +1599,7 @@ static bool az_write_sorted_figure_batches(
 
     uint32_t largest_category = 0U;
     for(uint16_t i = 0; i < category_count; i++) {
-        if(categories[i].count > largest_category) largest_category = categories[i].count;
+        if(category_counts[i] > largest_category) largest_category = category_counts[i];
     }
     if(largest_category == 0U || largest_category > figure_count || largest_category > UINT16_MAX) {
         return false;
@@ -1508,7 +1656,7 @@ static bool az_write_sorted_figure_batches(
         uint16_t batch_end = batch_start;
         uint32_t batch_count = 0U;
         while(batch_end < category_count) {
-            uint32_t category_records = categories[batch_end].count;
+            uint32_t category_records = category_counts[batch_end];
             if(batch_count > 0U && batch_count + category_records > capacity) break;
             if(category_records > capacity) {
                 ok = false;
@@ -1526,6 +1674,7 @@ static bool az_write_sorted_figure_batches(
         /* Reset the order vector for the logical slots used by this batch. The key slabs themselves
          * are overwritten in place during the scan and never moved during sorting. */
         for(uint32_t i = 0U; i < batch_count; i++) batch.order[i] = (uint16_t)i;
+        az_name_pool_reset(&batch.names);
 
         if(!storage_file_seek(source, 0U, true)) {
             ok = false;
@@ -1545,7 +1694,7 @@ static bool az_write_sorted_figure_batches(
                 uint8_t rank = ranks[scan[i].figure.category];
                 if(rank < batch_start || rank >= batch_end) continue;
                 uint16_t filled = category_filled[rank];
-                if(filled >= categories[rank].count) {
+                if(filled >= category_counts[rank]) {
                     ok = false;
                     break;
                 }
@@ -1556,10 +1705,16 @@ static bool az_write_sorted_figure_batches(
                     break;
                 }
                 memcpy(destination_key->id, scan[i].figure.id, sizeof(destination_key->id));
-                az_str_copy(
-                    destination_key->name,
-                    sizeof(destination_key->name),
-                    scan[i].figure.name);
+                destination_key->name = az_name_pool_store(
+                    &batch.names,
+                    scan[i].figure.name,
+                    &destination_key->name_length,
+                    AZ_SORT_HEAP_MIN_RESERVE);
+                if(!destination_key->name) {
+                    if(out_allocation_failed) *out_allocation_failed = true;
+                    ok = false;
+                    break;
+                }
                 destination_key->source_ordinal = scanned + i;
                 category_filled[rank] = (uint16_t)(filled + 1U);
             }
@@ -1567,11 +1722,11 @@ static bool az_write_sorted_figure_batches(
         }
 
         for(uint16_t rank = batch_start; ok && rank < batch_end; rank++) {
-            if(category_filled[rank] != categories[rank].count) {
+            if(category_filled[rank] != category_counts[rank]) {
                 ok = false;
                 break;
             }
-            az_sort_category_batch(&batch, category_base[rank], categories[rank].count);
+            az_sort_category_batch(&batch, category_base[rank], category_counts[rank]);
         }
         if(ok) {
             ok = az_write_figure_batch(
@@ -1931,8 +2086,9 @@ static bool az_index_build(
     memset(&games_before, 0, sizeof(games_before));
     bool has_games = az_source_stamp(storage, AZ_GAMES_JSON, &games_before);
 
-    AzCategory* categories = calloc(AZ_MAX_CATEGORIES, sizeof(AzCategory));
+    AzBuildCategory* categories = calloc(AZ_MAX_CATEGORIES, sizeof(AzBuildCategory));
     if(!categories) return false;
+    AzNamePool category_names = {0};
     uint16_t category_count = 0;
     uint32_t figure_count = 0;
     uint32_t game_ref_count = 0;
@@ -1947,6 +2103,7 @@ static bool az_index_build(
         AzFigureBuildContext figure_context = {0};
         figure_context.raw_file = raw_figures;
         figure_context.categories = categories;
+        figure_context.category_names = &category_names;
         figure_context.category_capacity = AZ_MAX_CATEGORIES;
         figure_context.category_count = &category_count;
         AzProgressReporter amiibo_progress;
@@ -1989,16 +2146,19 @@ static bool az_index_build(
         az_str_copy(header.magic, sizeof(header.magic), AZ_INDEX_MAGIC);
         header.version = AZ_INDEX_VERSION;
         header.header_size = sizeof(header);
-        header.category_record_size = sizeof(AzIndexCategoryRecord);
+        header.category_record_size = sizeof(AzIndexCategoryPrefix);
         header.figure_record_size = sizeof(AzIndexFigureRecord);
         header.game_record_size = sizeof(AzIndexGameRef);
         header.amiibo_source = amiibo_before;
         header.games_source = games_before;
         header.figure_count = figure_count;
         header.category_count = category_count;
+        uint64_t category_bytes = 0U;
+        for(uint16_t i = 0U; i < category_count; i++) {
+            category_bytes += sizeof(AzIndexCategoryPrefix) + categories[i].name_length;
+        }
         uint64_t categories_offset = sizeof(header);
-        uint64_t figures_offset = categories_offset +
-                                  (uint64_t)header.category_count * sizeof(AzIndexCategoryRecord);
+        uint64_t figures_offset = categories_offset + category_bytes;
         uint64_t games_offset = figures_offset +
                                 (uint64_t)header.figure_count * sizeof(AzIndexFigureRecord);
         if(games_offset > UINT32_MAX) {
@@ -2011,20 +2171,34 @@ static bool az_index_build(
         }
     }
 
+    uint16_t category_counts[AZ_MAX_CATEGORIES] = {0};
     uint32_t first_figure = 0;
     for(uint16_t i = 0; ok && i < category_count; i++) {
-        AzIndexCategoryRecord record = {0};
-        record.category = categories[i];
-        record.first_figure = first_figure;
-        ok = az_write_exact(index, &record, sizeof(record));
+        AzIndexCategoryPrefix prefix = {
+            .id = categories[i].id,
+            .name_length = categories[i].name_length,
+            .count = categories[i].count,
+            .first_figure = first_figure,
+        };
+        category_counts[i] = categories[i].count;
+        ok = az_write_exact(index, &prefix, sizeof(prefix)) &&
+             (!prefix.name_length ||
+              az_write_exact(index, categories[i].name, prefix.name_length));
         first_figure += categories[i].count;
     }
+
+    /* Category names are no longer needed once their variable-length index records and the small
+     * count/rank tables exist. Release all category heap before the figure sorter starts. */
+    az_name_pool_free(&category_names);
+    free(categories);
+    categories = NULL;
+
     if(ok) {
         bool batch_allocation_failed = false;
         ok = az_write_sorted_figure_batches(
             storage,
             index,
-            categories,
+            category_counts,
             category_count,
             figure_count,
             category_ranks,
@@ -2138,6 +2312,7 @@ static bool az_index_build(
     storage_common_remove(storage, AZ_INDEX_RAW);
     storage_common_remove(storage, AZ_INDEX_SORT_RUNS);
     if(ok && out_count) *out_count = figure_count;
+    az_name_pool_free(&category_names);
     free(categories);
     return ok;
 }
@@ -2159,7 +2334,7 @@ static bool az_open_index(Storage* storage, File** out_file, AzIndexHeader* out_
     }
     AzIndexHeader header;
     uint64_t file_size = storage_file_size(file);
-    if(!az_read_exact(file, &header, sizeof(header)) || !az_header_layout_valid(&header, file_size)) {
+    if(!az_read_exact(file, &header, sizeof(header)) || !az_header_layout_valid(file, &header, file_size)) {
         storage_file_close(file);
         storage_file_free(file);
         return false;
@@ -2177,14 +2352,55 @@ static bool az_open_index(Storage* storage, File** out_file, AzIndexHeader* out_
  * @param out Destination for the computed result.
  * @return true on success; false if the operation cannot be completed.
  */
+static bool az_read_category_record_next(
+    File* file,
+    const AzIndexHeader* header,
+    uint32_t* cursor,
+    AzIndexCategoryRecord* out) {
+    if(!file || !header || !cursor || !out || *cursor < header->categories_offset ||
+       *cursor >= header->figures_offset) {
+        return false;
+    }
+    if((uint64_t)*cursor + sizeof(AzIndexCategoryPrefix) > header->figures_offset ||
+       !storage_file_seek(file, *cursor, true)) {
+        return false;
+    }
+
+    AzIndexCategoryPrefix prefix;
+    if(!az_read_exact(file, &prefix, sizeof(prefix))) return false;
+    uint32_t next = *cursor + sizeof(prefix);
+    if((uint64_t)next + prefix.name_length > header->figures_offset) return false;
+
+    memset(out, 0, sizeof(*out));
+    out->category.id = prefix.id;
+    out->category.count = prefix.count;
+    out->first_figure = prefix.first_figure;
+
+    /* The serialized name may use the full uint8_t range. The UI intentionally expands only the
+     * visible row into its bounded display buffer; skip any tail rather than rejecting the index. */
+    size_t visible_length = prefix.name_length;
+    if(visible_length >= sizeof(out->category.name)) visible_length = sizeof(out->category.name) - 1U;
+    if(visible_length && !az_read_exact(file, out->category.name, visible_length)) return false;
+    out->category.name[visible_length] = '\0';
+
+    *cursor = next + prefix.name_length;
+    if(prefix.name_length > visible_length && !storage_file_seek(file, *cursor, true)) return false;
+    return true;
+}
+
 static bool az_read_category_record(
     File* file,
     const AzIndexHeader* header,
     uint16_t ordinal,
     AzIndexCategoryRecord* out) {
     if(!file || !header || !out || ordinal >= header->category_count) return false;
-    uint32_t offset = header->categories_offset + (uint32_t)ordinal * sizeof(*out);
-    return storage_file_seek(file, offset, true) && az_read_exact(file, out, sizeof(*out));
+    uint32_t cursor = header->categories_offset;
+    AzIndexCategoryRecord record;
+    for(uint16_t i = 0U; i <= ordinal; i++) {
+        if(!az_read_category_record_next(file, header, &cursor, &record)) return false;
+    }
+    *out = record;
+    return true;
 }
 
 /**
@@ -2222,9 +2438,11 @@ static bool az_find_category_record(
     const AzIndexHeader* header,
     uint8_t category,
     AzIndexCategoryRecord* out) {
+    if(!file || !header || !out) return false;
+    uint32_t cursor = header->categories_offset;
     for(uint16_t i = 0; i < header->category_count; i++) {
         AzIndexCategoryRecord record;
-        if(!az_read_category_record(file, header, i, &record)) return false;
+        if(!az_read_category_record_next(file, header, &cursor, &record)) return false;
         if(record.category.id == category) {
             *out = record;
             return true;
@@ -2302,10 +2520,11 @@ bool az_db_get_category_window(
     if(total && selection >= total) selection = (uint16_t)(total - 1);
     uint16_t start = az_window_start(selection, total);
     uint8_t rows = 0;
-    for(uint16_t i = start; i < total && rows < AZ_LIST_ROWS; i++) {
+    uint32_t cursor = header.categories_offset;
+    for(uint16_t i = 0U; i < total && rows < AZ_LIST_ROWS; i++) {
         AzIndexCategoryRecord record;
-        if(!az_read_category_record(file, &header, i, &record)) break;
-        out_rows[rows++] = record.category;
+        if(!az_read_category_record_next(file, &header, &cursor, &record)) break;
+        if(i >= start) out_rows[rows++] = record.category;
     }
     storage_file_close(file);
     storage_file_free(file);

@@ -56,7 +56,7 @@ The game table is a binary pattern table. Wildcard matching occurs against the i
 
 ### Index construction memory rule
 
-`amiibo.json` is streamed once into the temporary fixed-record file `amiibo.raw.tmp` while `amiibo_series` names update the bounded category array. Categories are sorted alphabetically in RAM. The normal figure sorter targets batches of up to 512 figures, but it does not keep complete 112-byte index records resident. It stores only a 76-byte key (`name`, binary ID, and raw-file ordinal) in small independent slabs and keeps a contiguous `uint16_t` order vector. Heap sort moves only those 2-byte order entries; the complete fixed records stay in `amiibo.raw.tmp` and are read back into a four-record scan/staging buffer on the already-reserved app stack in final sorted order. This both tolerates fragmentation and reduces the dominant resident sort payload by roughly 30%.
+`amiibo.json` is streamed once into the temporary fixed-record file `amiibo.raw.tmp`. Category descriptors keep only ID/count plus a pointer and `uint8_t` name length; the names themselves are packed at exact length into small pooled slabs. Categories are sorted alphabetically in RAM, serialized as an 8-byte prefix followed by `name_length` bytes, then the entire category descriptor/name pool is freed before figure sorting begins. The normal figure sorter targets batches of up to 512 figures, but it does not keep complete 112-byte index records resident. Each sort-key descriptor keeps only a pooled-name pointer, `uint8_t` name length, binary ID, and raw-file ordinal, while a contiguous `uint16_t` order vector supplies the movable ordering. Heap sort moves only those 2-byte order entries; complete fixed figure records stay in `amiibo.raw.tmp` and are read back through a four-record stack staging buffer in final sorted order.
 
 If even the compact largest-category batch cannot be allocated, the build falls back to the bounded external run/merge sorter. Its run size is eight full records (896 bytes) and that run buffer lives on the already-reserved application stack, so the fallback does not need a record-array heap allocation. JSON full-file scans use a fixed 2 KiB heap buffer.
 
@@ -195,7 +195,7 @@ Before packaging:
 - check stack-usage reports for unexpectedly large frames;
 - inspect unresolved imports for forbidden symbols;
 - run the unified-index synthetic test, including size-change invalidation and sampled-window same-size mutation invalidation;
-- verify fixed figure/category records match the source, including each figure's `amiibo.json` offset/length;
+- verify fixed figure records and variable-length category records match the source, including each figure's `amiibo.json` offset/length;
 - verify wildcard compatibility scans only matching indexed `games_info.json` ranges and combines all matches;
 - test generate → decrypt → UID re-key roundtrip with deterministic host fixtures when crypto test infrastructure is available;
 - verify both NTAG215 and v3 page mappings;

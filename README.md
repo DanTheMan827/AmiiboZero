@@ -62,7 +62,7 @@ The first 80 bytes are the data key and the second 80 bytes are the static/tag k
 The binary index contains:
 
 - source size and bounded beginning/middle/end sample fingerprint for both JSON files;
-- alphabetically sorted fixed-size category records and their first-figure ordinals;
+- alphabetically sorted variable-length category records with a fixed 8-byte prefix, one-byte name length, and first-figure ordinal;
 - fixed `AzFigure` records containing ID, hexadecimal ID, name, North-American release date, category/type bytes, and the exact `amiibo.json` object offset/length;
 - generalized compatibility ID patterns from `games_info.json`, each with the exact matching JSON member offset/length.
 
@@ -185,9 +185,9 @@ The type-3 implementation was independently written from observed format behavio
 - Neither JSON database is loaded wholly into RAM.
 - lwJSON stream parsers are allocated only for active scans.
 - Full JSON scans use 2 KiB reads; indexed standalone-object reads use 512-byte chunks.
-- The complete figure/category catalog is not retained in RAM. Visible rows are read from fixed records in `amiibo.idx`.
+- The complete figure/category catalog is not retained in RAM. Visible figure rows are read from fixed figure records; category records use a compact variable-length name section and only visible categories are expanded into UI structs.
 - Each indexed figure stores its fixed metadata plus the exact `amiibo.json` object offset/length; compatibility patterns retain exact `games_info.json` object ranges.
-- Category and figure names are stored inside fixed index records; browsing and search read only the bounded index records needed for the current window or search scan.
+- Category names are stored as `uint8_t` length-prefixed variable strings. Figure names remain in fixed on-disk figure records for cheap random access, while rebuild sorting stores figure names at exact length in pooled slabs.
 - Compatibility parsing scans the binary wildcard table and seeks to each matching `games_info.json` offset/length range.
 - Saved-file and compatibility catalogs are allocated only while those workflows are open and are released when the user leaves them.
 - Large database work is moved to a dedicated worker with its own bounded stack.

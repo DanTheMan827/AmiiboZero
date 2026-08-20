@@ -925,17 +925,27 @@ void az_ui_status_refresh(AmiiboZeroApp* app) {
 }
 
 /**
- * @brief Move a bounded selection by one row while resetting marquee animation.
+ * @brief Move a selection by one row, wrapping at list boundaries, while resetting marquee animation.
  */
 void az_ui_move_selection(AmiiboZeroApp* app, int direction, uint16_t count) {
-    if(count == 0) {
-        app->selection = 0;
+    if(!app) return;
+    if(count == 0U) {
+        app->selection = 0U;
         return;
     }
+
     uint16_t old = app->selection;
-    if(direction < 0 && app->selection > 0) app->selection--;
-    else if(direction > 0 && app->selection + 1 < count) app->selection++;
-    if(old != app->selection) app->animation = 0;
+    if(app->selection >= count) app->selection = 0U;
+
+    if(direction < 0) {
+        app->selection = app->selection == 0U ? (uint16_t)(count - 1U) :
+                                               (uint16_t)(app->selection - 1U);
+    } else if(direction > 0) {
+        app->selection = app->selection + 1U >= count ? 0U :
+                                                          (uint16_t)(app->selection + 1U);
+    }
+
+    if(old != app->selection) app->animation = 0U;
 }
 
 /**
