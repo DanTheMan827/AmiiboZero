@@ -100,9 +100,10 @@ function App() {
         setBusy(true);
         setMessage('Opening Web Serial connection…');
         try {
-            await serialRef.current.connect();
+            const info = await serialRef.current.connect();
+            const model = info.match(/hardware_model\s*:\s*([^\r\n]+)/i)?.[1]?.trim() || 'Flipper Zero';
             setConnected(true);
-            setMessage('Flipper Zero connected. Choose your key file, then install.');
+            setMessage(`${model} connected. Choose your key file, then install.`);
         } catch (err) {
             setConnected(false);
             setError(err.message);

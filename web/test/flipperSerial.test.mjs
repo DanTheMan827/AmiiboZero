@@ -67,3 +67,42 @@ test('writeFile mirrors Flipper write_chunk append protocol and replaces old dat
     assert.match(flipper.commands[1], / 8192\r$/);
     assert.match(flipper.commands[2], / 3616\r$/);
 });
+
+
+test('canonical Flipper USB CDC identity is VID 0483 PID 5740', () => {
+    assert.equal(FlipperSerial.isCanonicalUsbDevice({usbVendorId: 0x0483, usbProductId: 0x5740}), true);
+    assert.equal(FlipperSerial.isCanonicalUsbDevice({usbVendorId: 0x0483, usbProductId: 0xdf11}), false);
+    assert.equal(FlipperSerial.isCanonicalUsbDevice({usbVendorId: 0x1234, usbProductId: 0x5740}), false);
+});
+
+test('readDeviceInfo waits for hardware_model instead of a stale CLI prompt', async () => {
+    const encoder = new TextEncoder();
+    class InfoMock extends FlipperSerial {
+        constructor() {
+            super();
+            this.sent = [];
+            this.reads = [];
+        }
+        async writeText(text) {
+            this.sent.push(text);
+        }
+        async readUntil(marker) {
+            this.reads.push(marker);
+            if (marker === 'hardware_model') {
+                // Simulate a stale prompt left in the receive stream before the
+                // actual device_info output. The old implementation stopped here.
+                return encoder.encode('>: device_info\r\ndevice_info_major             : 2\r\n');
+            }
+            if (marker === '>: ') {
+                return encoder.encode('                         : Flipper Zero\r\nhardware_uid                   : 0123456789ABCDEF\r\n');
+            }
+            throw new Error(`unexpected marker ${marker}`);
+        }
+    }
+
+    const flipper = new InfoMock();
+    const info = await flipper.readDeviceInfo();
+    assert.deepEqual(flipper.sent, ['device_info\r']);
+    assert.deepEqual(flipper.reads, ['hardware_model', '>: ']);
+    assert.match(info, /hardware_model\s*:\s*Flipper Zero/i);
+});

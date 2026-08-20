@@ -5,6 +5,9 @@ const CLI_PROMPT = '>: ';
 const DEFAULT_TIMEOUT_MS = 15000;
 const WRITE_TIMEOUT_MS = 60000;
 const DEFAULT_CHUNK_SIZE = 8192;
+const FLIPPER_USB_VENDOR_ID = 0x0483;
+const FLIPPER_USB_PRODUCT_ID = 0x5740;
+const FLIPPER_USB_FILTERS = [{usbVendorId: FLIPPER_USB_VENDOR_ID, usbProductId: FLIPPER_USB_PRODUCT_ID}];
 
 function concatBytes(a, b) {
     const merged = new Uint8Array(a.length + b.length);
@@ -56,18 +59,58 @@ export class FlipperSerial {
             throw new Error('Web Serial requires a Chromium-based desktop browser on HTTPS or localhost.');
         }
 
-        this.port = await navigator.serial.requestPort();
+        // Official Flipper Zero firmware exposes its CLI as USB CDC ACM with
+        // STMicroelectronics VID 0x0483 and PID 0x5740. Filtering here prevents
+        // accidentally selecting an unrelated serial adapter.
+        this.port = await navigator.serial.requestPort({filters: FLIPPER_USB_FILTERS});
+        const usbInfo = this.port.getInfo?.() ?? {};
+        if (!FlipperSerial.isCanonicalUsbDevice(usbInfo)) {
+            const vid = usbInfo.usbVendorId == null ? 'unknown' : `0x${usbInfo.usbVendorId.toString(16).padStart(4, '0')}`;
+            const pid = usbInfo.usbProductId == null ? 'unknown' : `0x${usbInfo.usbProductId.toString(16).padStart(4, '0')}`;
+            throw new Error(`The selected serial device is not the canonical Flipper Zero USB CDC device (${vid}:${pid}).`);
+        }
+
         await this.port.open({baudRate: 115200, bufferSize: 65536});
+        // Flipper's CLI VCP starts its shell when the host asserts DTR. PySerial
+        // does this as part of opening a normal serial port; Web Serial exposes
+        // it explicitly, so assert it before waiting for the CLI prompt.
+        await this.port.setSignals?.({dataTerminalReady: true, requestToSend: false});
         this.reader = this.port.readable.getReader();
         this.writer = this.port.writable.getWriter();
         this.buffer = new Uint8Array(0);
 
-        // Wake/synchronize the CLI, then verify this is a Flipper Zero CLI.
-        await this.writeText('\r');
-        await this.readUntil(CLI_PROMPT, 8000);
-        const info = await this.command('device_info', 10000);
-        if (!/hardware_model/i.test(info)) {
-            throw new Error('The selected serial device did not identify itself as a Flipper Zero.');
+        try {
+            // Mirror scripts/flipper/storage.py: opening the CDC port produces the
+            // CLI prompt. Do not send an empty command first; that can enqueue a
+            // second prompt and make the next command appear to have no output.
+            await new Promise((resolve) => setTimeout(resolve, 500));
+            await this.readUntil(CLI_PROMPT, 8000);
+
+            const info = await this.readDeviceInfo();
+            return info;
+        } catch (error) {
+            await this.disconnect();
+            throw error;
+        }
+    }
+
+    static isCanonicalUsbDevice(info) {
+        return info?.usbVendorId === FLIPPER_USB_VENDOR_ID && info?.usbProductId === FLIPPER_USB_PRODUCT_ID;
+    }
+
+    async readDeviceInfo(timeoutMs = 10000) {
+        // This deliberately follows the official host storage client: send
+        // device_info and wait for the canonical hardware_model property before
+        // consuming the final CLI prompt. Waiting for the property (rather than
+        // the first prompt) also tolerates a stale prompt already in the RX queue.
+        await this.writeText('device_info\r');
+        const beforeModel = await this.readUntil('hardware_model', timeoutMs);
+        const afterModel = await this.readUntil(CLI_PROMPT, timeoutMs);
+        const info = `${decoder.decode(beforeModel)}hardware_model${decoder.decode(afterModel)}`;
+
+        const model = info.match(/hardware_model\s*:\s*([^\r\n]+)/i)?.[1]?.trim();
+        if (!model) {
+            throw new Error('Connected to the Flipper USB serial interface, but device_info did not return hardware_model.');
         }
         return info;
     }
@@ -93,6 +136,11 @@ export class FlipperSerial {
         this.buffer = new Uint8Array(0);
 
         if (this.port) {
+            try {
+                await this.port.setSignals?.({dataTerminalReady: false, requestToSend: false});
+            } catch {
+                // Device may already be gone.
+            }
             try {
                 await this.port.close();
             } catch {
