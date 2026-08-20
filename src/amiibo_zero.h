@@ -162,7 +162,7 @@ typedef struct {
     bool initialized;           /**< Amiibo register/nickname data has been initialized. */
     bool app_data_initialized;  /**< Application area has been initialized by a game. */
     char nickname[48];          /**< Amiibo nickname decoded from UTF-16BE when present. */
-    char owner_mii[48];         /**< Owner Mii name decoded from UTF-16BE when present. */
+    char owner_mii[48];         /**< Embedded Mii name decoded from UTF-16LE when present. */
     char init_date[12];         /**< Registration date as YYYY-MM-DD when valid. */
     char write_date[12];        /**< Last-write date as YYYY-MM-DD when valid. */
     uint16_t write_counter;     /**< Main Amiibo write counter. */
@@ -360,6 +360,7 @@ struct AmiiboZeroApp {
     NfcDevice* nfc_device;                      /**< App-lifetime mutable NFC data; retained across screens. */
     NfcListener* listener;                      /**< Active emulation listener or NULL. */
     BitBuffer* v3_tx_buffer;                    /**< Reusable standard/short response buffer for v3 emulation. */
+    uint8_t* v3_response_buffer;                 /**< 1 KiB FAST_READ scratch, allocated only while v3 emulates. */
     bool v3_i2c_listener;                       /**< True when the stock-derived I2C Plus listener is active. */
     bool v3_sector_select_pending;              /**< Waiting for the second SECTOR_SELECT frame. */
     bool v3_authenticated;                      /**< Current PWD_AUTH state, reset like Flipper's MFUL listener. */

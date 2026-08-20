@@ -12,6 +12,7 @@
 #include <nfc/protocols/mf_ultralight/mf_ultralight.h>
 #include <nfc/protocols/mf_ultralight/mf_ultralight_poller.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /** Byte offset where the type-3 layout inserts its 0x40-byte nonce window. */
@@ -296,7 +297,7 @@ bool az_nfc_device_is_v3(const NfcDevice* device) {
 }
 
 /** Maximum standard-frame payload emitted by Flipper's MFUL listener. */
-#define AZ_V3_MAX_RESPONSE_BYTES 256U
+#define AZ_V3_MAX_RESPONSE_BYTES 1024U
 /** Maximum transmitted bytes after appending CRC-A to a standard response. */
 #define AZ_V3_TX_CAPACITY (AZ_V3_MAX_RESPONSE_BYTES + 2U)
 /** First NTAG I2C Plus dynamic-lock page in sector 0. */
@@ -388,17 +389,20 @@ static MfUltralightData* az_v3_data(AmiiboZeroApp* app) {
 }
 
 /**
- * @brief Match Flipper's I2C page-validity rules, with the real SRAM window added.
+ * @brief Validate READ/FAST_READ starting pages against the NTAG I2C Plus command map.
  */
-static bool az_v3_page_valid(const AmiiboZeroApp* app, uint16_t page) {
-    if(!app) return false;
+static bool az_v3_read_start_valid(const AmiiboZeroApp* app, uint16_t page) {
+    if(!app || page > 0xFFU) return false;
     switch(app->v3_sector) {
     case 0:
-        /* The compact save omits EA/EB and EE/EF, but the RF-visible I2C Plus sector still
-         * spans 00-FF. Omitted pages read as zero and accept writes without persistence. */
-        return page <= 0xFFU;
+        /* NXP permits READ/FAST_READ to start in EEPROM/config through E9, the two
+         * session-register pages EC/ED, and (when mapped/pass-through is active) SRAM.
+         * Amiibo v3 compatibility always exposes the precomputed F0-FF SRAM window. */
+        return page <= AZ_V3_REGISTER_LOCK_PAGE ||
+               (page >= AZ_V3_SESSION_PAGE && page <= AZ_V3_NS_REG_PAGE) ||
+               (page >= AZ_V3_SRAM_FIRST_PAGE && page <= AZ_V3_SRAM_LAST_PAGE);
     case 1:
-        return page <= 0xFFU;
+        return true;
     case 2:
         return false;
     case 3:
@@ -409,32 +413,40 @@ static bool az_v3_page_valid(const AmiiboZeroApp* app, uint16_t page) {
 }
 
 /**
- * @brief Match Flipper's FAST_READ range validation, extended for sector-0 SRAM.
+ * @brief Return whether WRITE may address a persistent/compatibility page in the selected sector.
  */
-static bool az_v3_range_valid(const AmiiboZeroApp* app, uint16_t start_page, uint16_t end_page) {
-    if(!app) return false;
+static bool az_v3_write_start_valid(const AmiiboZeroApp* app, uint16_t page) {
+    if(!app || page > 0xFFU) return false;
     switch(app->v3_sector) {
     case 0:
-        return start_page <= 0xFFU && end_page <= 0xFFU;
+        /* NXP WRITE starts are 02-E9; F0-FF is accepted here only for the known v3
+         * compatibility mailbox behavior. EC/ED are volatile read-only session registers. */
+        return (page >= 0x02U && page <= AZ_V3_REGISTER_LOCK_PAGE) ||
+               (page >= AZ_V3_SRAM_FIRST_PAGE && page <= AZ_V3_SRAM_LAST_PAGE);
     case 1:
-        return start_page <= 0xFFU && end_page <= 0xFFU;
-    case 2:
-        return false;
-    case 3:
-        /* Flipper's provider validates the starting mirrored session page and zero-fills
-         * any following invalid pages through its per-page read path. */
-        return start_page >= AZ_V3_MIRROR_SESSION_PAGE &&
-               start_page <= AZ_V3_MIRROR_NS_REG_PAGE;
+        return true;
     default:
         return false;
     }
 }
 
 /**
+ * @brief Validate an inclusive FAST_READ range in the currently selected sector.
+ *
+ * NXP validates the start address. If a valid request subsequently traverses an invalid
+ * address in the same sector, those bytes read as zero; the per-page reader below provides
+ * that zero fill. Sector 3 only exposes the F8/F9 session-register mirror as a valid start.
+ */
+static bool az_v3_range_valid(const AmiiboZeroApp* app, uint16_t start_page, uint16_t end_page) {
+    return app && start_page <= end_page && end_page <= 0xFFU &&
+           az_v3_read_start_valid(app, start_page);
+}
+
+/**
  * @brief Map one logical RF page to Flipper's compact native I2C Plus page array.
  */
 static bool az_v3_native_page(const AmiiboZeroApp* app, uint16_t page, uint16_t* native_page) {
-    if(!app || !native_page || !az_v3_page_valid(app, page)) return false;
+    if(!app || !native_page || page > 0xFFU) return false;
 
     switch(app->v3_sector) {
     case 0:
@@ -455,8 +467,15 @@ static bool az_v3_native_page(const AmiiboZeroApp* app, uint16_t page, uint16_t*
         *native_page = (uint16_t)(236U + page);
         return true;
     case 3:
-        *native_page = page == AZ_V3_MIRROR_SESSION_PAGE ? 234U : 235U;
-        return true;
+        if(page == AZ_V3_MIRROR_SESSION_PAGE) {
+            *native_page = 234U;
+            return true;
+        }
+        if(page == AZ_V3_MIRROR_NS_REG_PAGE) {
+            *native_page = 235U;
+            return true;
+        }
+        return false;
     default:
         return false;
     }
@@ -479,7 +498,7 @@ static void az_v3_read_page(
     uint16_t page,
     uint8_t out[4]) {
     memset(out, 0, 4U);
-    if(!app || !data || !az_v3_page_valid(app, page)) return;
+    if(!app || !data || page > 0xFFU) return;
 
     if(app->v3_sector == 0 && page >= AZ_V3_SRAM_FIRST_PAGE && page <= AZ_V3_SRAM_LAST_PAGE) {
         const size_t offset = (size_t)(page - AZ_V3_SRAM_FIRST_PAGE) * 4U;
@@ -506,11 +525,10 @@ static void az_v3_read_page(
 /**
  * @brief Apply one pixl.js-compatible v3 WRITE to the compact native I2C Plus model.
  *
- * The working v3 path accepts reader writes directly instead of trying to reproduce an
- * additional local lock/auth policy.  Amiibo Zero keeps the older compact Flipper storage
- * representation here: sector-0 SRAM remains external, and the omitted EA/EB pages have no
- * native backing slot.  Writes to those non-backed windows are ACKed without changing the
- * selected lock-on response.
+ * The working v3 path deliberately relaxes lock/auth enforcement for ordinary valid EEPROM
+ * writes, matching the public Pixl compatibility behavior. Address validity still follows the
+ * I2C Plus command map: invalid gaps and read-only session-register pages are rejected. Sector-0
+ * SRAM remains external and the known v3 mailbox write is ACKed without replacing its response.
  */
 static AzV3CommandResult az_v3_write_page(
     AmiiboZeroApp* app,
@@ -519,21 +537,12 @@ static AzV3CommandResult az_v3_write_page(
     const uint8_t payload[4]) {
     if(!app || !data || !payload) return AzV3CommandNotProcessedNak;
 
-    /* Sector 3 is a read-only session-register mirror in this compact model. */
-    if(app->v3_sector == 3U) return AzV3CommandNotProcessedNak;
-    if(app->v3_sector > 1U) return AzV3CommandNotProcessedNak;
+    if(!az_v3_write_start_valid(app, page)) return AzV3CommandNotProcessedNak;
 
     /* Keep the precomputed lock-on SRAM response external to the native NFC device, exactly
      * as the UI-memory-fix baseline did.  Pixl ACKs the mailbox write without needing to make
      * it persistent tag data. */
     if(app->v3_sector == 0U && page >= AZ_V3_SRAM_FIRST_PAGE && page <= AZ_V3_SRAM_LAST_PAGE) {
-        return AzV3CommandProcessedAck;
-    }
-
-    /* EA/EB and EE/EF are omitted by Flipper's compact I2C Plus representation. They are
-     * not part of Amiibo Zero's saved v3 image, so accept writes without manufacturing storage. */
-    if(app->v3_sector == 0U &&
-       ((page >= 0xEAU && page <= 0xEBU) || (page >= 0xEEU && page <= 0xEFU))) {
         return AzV3CommandProcessedAck;
     }
 
@@ -564,7 +573,9 @@ static AzV3CommandResult az_v3_dispatch_command(
 
     if(app->v3_sector_select_pending) {
         app->v3_sector_select_pending = false;
-        if(size != 4U) return AzV3CommandNotProcessedNak;
+        if(size != 4U || rx[1] != 0U || rx[2] != 0U || rx[3] != 0U) {
+            return AzV3CommandNotProcessedNak;
+        }
         app->v3_sector = rx[0];
         return AzV3CommandProcessedSilent;
     }
@@ -573,7 +584,7 @@ static AzV3CommandResult az_v3_dispatch_command(
     case AZ_NFC_CMD_READ: {
         if(size != 2U) return AzV3CommandNotFound;
         const uint16_t start_page = rx[1];
-        if(!az_v3_page_valid(app, start_page)) return AzV3CommandNotProcessedNak;
+        if(!az_v3_read_start_valid(app, start_page)) return AzV3CommandNotProcessedNak;
 
         uint8_t response[16];
         for(uint16_t i = 0U; i < 4U; i++) {
@@ -592,13 +603,12 @@ static AzV3CommandResult az_v3_dispatch_command(
         }
 
         const uint16_t page_count = (uint16_t)(end_page - start_page + 1U);
-        if(page_count == 0U || page_count > 64U) return AzV3CommandNotProcessedNak;
+        if(page_count == 0U || !app->v3_response_buffer) return AzV3CommandNotProcessedNak;
 
-        uint8_t response[AZ_V3_MAX_RESPONSE_BYTES];
         for(uint16_t i = 0U; i < page_count; i++) {
-            az_v3_read_page(app, data, start_page + i, response + i * 4U);
+            az_v3_read_page(app, data, start_page + i, app->v3_response_buffer + i * 4U);
         }
-        az_v3_send_standard(app, response, (size_t)page_count * 4U);
+        az_v3_send_standard(app, app->v3_response_buffer, (size_t)page_count * 4U);
         return AzV3CommandProcessed;
     }
 
@@ -608,6 +618,10 @@ static AzV3CommandResult az_v3_dispatch_command(
 
     case AZ_NFC_CMD_FAST_WRITE:
         if(size != 67U) return AzV3CommandNotFound;
+        if(rx[1] != AZ_V3_SRAM_FIRST_PAGE || rx[2] != AZ_V3_SRAM_LAST_PAGE ||
+           app->v3_sector != 0U) {
+            return AzV3CommandNotProcessedNak;
+        }
         /* Match the working pixl.js-compatible path: ACK FAST_WRITE without replacing the
          * selected precomputed SRAM response. */
         return AzV3CommandProcessedAck;
@@ -633,6 +647,7 @@ static AzV3CommandResult az_v3_dispatch_command(
 
     case AZ_NFC_CMD_SECTOR_SELECT:
         if(size != 2U) return AzV3CommandNotFound;
+        if(rx[1] != 0xFFU) return AzV3CommandNotProcessedNak;
         app->v3_sector_select_pending = true;
         return AzV3CommandProcessedAck;
 
@@ -761,6 +776,14 @@ bool az_nfc_listener_start(AmiiboZeroApp* app) {
         app->listener = NULL;
         return false;
     }
+    app->v3_response_buffer = malloc(AZ_V3_MAX_RESPONSE_BYTES);
+    if(!app->v3_response_buffer) {
+        bit_buffer_free(app->v3_tx_buffer);
+        app->v3_tx_buffer = NULL;
+        nfc_listener_free(app->listener);
+        app->listener = NULL;
+        return false;
+    }
 
     app->v3_sector = 0U;
     app->v3_sector_select_pending = false;
@@ -783,11 +806,13 @@ bool az_nfc_listener_pause_and_sync(AmiiboZeroApp* app) {
         app->listener = NULL;
         if(app->v3_tx_buffer) bit_buffer_free(app->v3_tx_buffer);
         app->v3_tx_buffer = NULL;
+        free(app->v3_response_buffer);
+        app->v3_response_buffer = NULL;
         app->v3_i2c_listener = false;
         app->v3_sector_select_pending = false;
         app->v3_sector = 0U;
         app->v3_authenticated = false;
-            app->emulating = false;
+        app->emulating = false;
         return true;
     }
 
@@ -829,15 +854,12 @@ bool az_nfc_randomize_uid(NfcDevice* device, const AzKeys* keys) {
 }
 
 /**
- * @brief Convert one UTF-16BE field into bounded UTF-8 for display.
- * @param source UTF-16BE source bytes.
- * @param code_units Maximum 16-bit code units to decode.
- * @param out Destination UTF-8 buffer.
- * @param out_size Destination capacity.
+ * @brief Convert one bounded UTF-16 field into UTF-8 for display.
  */
-static void az_utf16be_to_utf8(
+static void az_utf16_to_utf8(
     const uint8_t* source,
     size_t code_units,
+    bool big_endian,
     char* out,
     size_t out_size) {
     if(!out || out_size == 0) return;
@@ -845,7 +867,10 @@ static void az_utf16be_to_utf8(
     if(!source) return;
     size_t p = 0;
     for(size_t i = 0; i < code_units; i++) {
-        uint16_t cp = (uint16_t)(((uint16_t)source[i * 2] << 8) | source[i * 2 + 1]);
+        const uint8_t a = source[i * 2U];
+        const uint8_t b = source[i * 2U + 1U];
+        const uint16_t cp = big_endian ? (uint16_t)(((uint16_t)a << 8) | b) :
+                                         (uint16_t)(((uint16_t)b << 8) | a);
         if(cp == 0 || cp == 0xFFFFU) break;
         if(cp < 0x80U) {
             if(p + 1 >= out_size) break;
@@ -862,6 +887,22 @@ static void az_utf16be_to_utf8(
         }
     }
     out[p] = '\0';
+}
+
+static void az_utf16be_to_utf8(
+    const uint8_t* source,
+    size_t code_units,
+    char* out,
+    size_t out_size) {
+    az_utf16_to_utf8(source, code_units, true, out, out_size);
+}
+
+static void az_utf16le_to_utf8(
+    const uint8_t* source,
+    size_t code_units,
+    char* out,
+    size_t out_size) {
+    az_utf16_to_utf8(source, code_units, false, out, out_size);
 }
 
 /**
@@ -920,7 +961,7 @@ bool az_nfc_read_details(const NfcDevice* device, const AzKeys* keys, AzAmiiboDe
     az_format_amiibo_date(plain + 0x1A, out->write_date, sizeof(out->write_date));
     if(out->initialized) {
         az_utf16be_to_utf8(plain + 0x20, 10, out->nickname, sizeof(out->nickname));
-        az_utf16be_to_utf8(plain + 0xBA, 10, out->owner_mii, sizeof(out->owner_mii));
+        az_utf16le_to_utf8(plain + 0xBA, 10, out->owner_mii, sizeof(out->owner_mii));
     }
     if(out->app_data_initialized) {
         out->application_id = az_read_be64(plain + 0x100);
