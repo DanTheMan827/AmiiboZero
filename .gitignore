@@ -1,1 +1,5 @@
 dist/
+web/node_modules/
+web/dist/
+web/public/amiibo_zero.fap
+web/public/release.json

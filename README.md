@@ -203,6 +203,29 @@ ufbt launch
 
 The manifest intentionally uses explicit source masks so vendored `lwjson_stream.c` is compiled exactly once.
 
+
+## Web Serial installer
+
+The `web/` directory contains a static Vite/React installer for Chromium-based desktop browsers. It uses the browser Web Serial API to talk directly to the Flipper Zero CLI over USB; no desktop bridge or server-side key upload is used. The installer:
+
+- installs the release-channel FAP at `/ext/apps/NFC/amiibo_zero.fap`;
+- accepts the user's local 160-byte `key_retail.bin` and transfers it only over Web Serial to `/ext/apps_data/amiibo_zero/key_retail.bin`;
+- fetches the current `amiibo.json` and `games_info.json` from `https://dantheman827.github.io/AmiiboData/database/`;
+- parses each JSON response and re-serializes it with `JSON.stringify()` before transfer, removing formatting whitespace while validating that the download is valid JSON;
+- removes existing destination files before using Flipper's append-oriented `storage write_chunk` CLI command, then verifies the final file size with `storage stat`.
+
+The GitHub Actions FAP workflow also builds the web installer. Its web artifact always embeds the **release SDK-channel FAP produced by the same workflow run**. A GitHub Pages deployment happens only after the semantic-version tag run has successfully created the public GitHub Release, so normal pushes, pull requests, and manual development builds do not update the live Pages site.
+
+For local UI development:
+
+```bash
+cd web
+npm install
+npm run dev
+```
+
+Web Serial requires a secure context (`https://` or localhost) and a compatible desktop Chromium browser such as Chrome or Edge. See `web/README.md` for the transfer protocol and production-build details.
+
 ## Source layout
 
 ```text
@@ -219,6 +242,7 @@ src/ui/*.h                 per-screen renderer declarations
 src/ui/ui_common.cpp       shared drawing helpers
 third_party/lwjson/        minimal MIT lwJSON streaming subset
 tools/fetch_databases.py   raw database downloader only
+web/                       Vite/React Web Serial release installer
 docs/DEVELOPMENT.md
 Doxyfile
 THIRD_PARTY_NOTICES.md

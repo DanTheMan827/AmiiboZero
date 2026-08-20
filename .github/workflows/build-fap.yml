@@ -153,10 +153,93 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  web:
+    name: Build Web Serial installer
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Download release-channel FAP from this build
+        uses: actions/download-artifact@v8
+        with:
+          name: amiibo-zero-release
+          path: web-fap
+
+      - name: Inject release FAP into web installer
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          fap_path="$(find web-fap -type f -name '*.fap' -print -quit)"
+          if [[ -z "${fap_path}" ]]; then
+            echo "::error::Release-channel build did not produce a .fap file."
+            exit 1
+          fi
+
+          cp "${fap_path}" web/public/amiibo_zero.fap
+
+          if [[ "${GITHUB_REF_TYPE:-}" == "tag" && "${GITHUB_REF_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            release_version="${GITHUB_REF_NAME#v}"
+          else
+            release_version="development-${GITHUB_SHA::7}"
+          fi
+
+          fap_size="$(stat -c '%s' web/public/amiibo_zero.fap)"
+          fap_sha256="$(sha256sum web/public/amiibo_zero.fap | awk '{print $1}')"
+
+          python3 - <<PY
+          import json
+          from pathlib import Path
+
+          manifest = {
+              "version": "${release_version}",
+              "fap": "amiibo_zero.fap",
+              "fapSize": int("${fap_size}"),
+              "fapSha256": "${fap_sha256}",
+              "commit": "${GITHUB_SHA}",
+          }
+          Path("web/public/release.json").write_text(
+              json.dumps(manifest, separators=(",", ":")) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+          cat web/public/release.json
+
+      - name: Install web dependencies
+        working-directory: web
+        run: npm install --no-audit --no-fund
+
+      - name: Test web installer
+        working-directory: web
+        run: npm test
+
+      - name: Build web installer
+        working-directory: web
+        run: npm run build
+
+      - name: Upload web build artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: amiibo-zero-web
+          path: web/dist
+          if-no-files-found: error
+          retention-days: 14
+
   release:
     name: Publish GitHub release
     if: github.event_name == 'push' && github.ref_type == 'tag'
-    needs: build
+    needs:
+      - build
+      - web
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -180,15 +263,50 @@ jobs:
         with:
           name: amiibo-zero-release
           path: release-dist
-          
+
       - name: Public release
         uses: softprops/action-gh-release@v2
         with:
-          name: "Amiibo Zero v${{ steps.release-version.outputs.version}}"
-          tag_name: "v${{ steps.release-version.outputs.version}}"
+          name: "Amiibo Zero v${{ steps.release-version.outputs.version }}"
+          tag_name: "v${{ steps.release-version.outputs.version }}"
           draft: false
           generate_release_notes: true
           files: |
             release-dist/*.fap
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  pages:
+    name: Deploy release installer to GitHub Pages
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs:
+      - web
+      - release
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Download web build from this release run
+        uses: actions/download-artifact@v8
+        with:
+          name: amiibo-zero-web
+          path: pages-dist
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload GitHub Pages artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: pages-dist
+
+      - name: Deploy GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5

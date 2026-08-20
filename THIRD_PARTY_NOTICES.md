@@ -34,3 +34,13 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 ## TagMo research reference
 
 `HiddenRamblings/TagMo` was reviewed as an interoperability reference for blank-tag validation and the writable page ranges used when restoring state on an already locked Amiibo. **No TagMo source files are bundled or linked into Amiibo Zero.**
+
+## Web installer dependencies
+
+The optional `web/` installer is built with the following npm packages. They are not vendored in this repository; GitHub Actions installs them when producing the static site. The production JavaScript bundle includes the applicable runtime code.
+
+- **React 19.2.8** and **React DOM 19.2.8** — https://github.com/facebook/react — MIT License
+- **Vite 8.2.1** — https://github.com/vitejs/vite — MIT License
+- **@vitejs/plugin-react 6.0.5** — https://github.com/vitejs/vite-plugin-react — MIT License
+
+Refer to each upstream package for its complete license text and transitive dependency notices.
