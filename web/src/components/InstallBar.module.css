@@ -1,0 +1,12 @@
+.bar { margin-top: 16px; min-height: 82px; display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 15px 16px 15px 20px; border: 1px solid var(--border); border-radius: 17px; background: var(--surface); box-shadow: var(--shadow); }
+.status { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.light { width: 9px; height: 9px; flex: none; border-radius: 50%; background: var(--border-strong); }
+.light.ready { background: var(--success); box-shadow: 0 0 0 5px color-mix(in srgb, var(--success) 10%, transparent); }
+.light.working { background: var(--accent); box-shadow: 0 0 0 5px var(--accent-soft); }
+.light.error { background: var(--danger); box-shadow: 0 0 0 5px color-mix(in srgb, var(--danger) 10%, transparent); }
+.status strong, .status span { display: block; } .status strong { color: var(--text); font-size: 12px; } .status span { margin-top: 4px; color: var(--muted); font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 650px; }
+.button { min-height: 48px; display: inline-flex; align-items: center; justify-content: center; gap: 9px; flex: none; padding: 0 20px; border: 1px solid var(--accent); border-radius: 12px; color: white; background: linear-gradient(145deg, var(--accent), var(--accent-strong)); font: inherit; font-size: 12px; font-weight: 800; cursor: pointer; }
+.button:disabled { opacity: .42; cursor: not-allowed; }
+.spinner { width: 15px; height: 15px; border: 2px solid rgba(255,255,255,.35); border-top-color: white; border-radius: 50%; animation: spin .75s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (max-width: 700px) { .bar { align-items: stretch; flex-direction: column; } .button { width: 100%; } .status span { white-space: normal; } }

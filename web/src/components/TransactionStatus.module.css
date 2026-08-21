@@ -1,0 +1,8 @@
+.wrap { display: grid; grid-template-columns: 1fr auto 1fr; gap: 12px; align-items: center; margin-top: 16px; }
+.phase { min-height: 66px; display: flex; gap: 11px; align-items: center; padding: 12px 14px; border: 1px solid var(--border); border-radius: 14px; background: var(--surface); }
+.phaseIcon { width: 34px; height: 34px; display: grid; place-items: center; border-radius: 9px; color: var(--muted); background: var(--surface-raised); }
+.phase strong, .phase small { display: block; } .phase strong { color: var(--text); font-size: 11px; } .phase small { margin-top: 4px; color: var(--muted); font-size: 9px; line-height: 1.45; }
+.working { border-color: color-mix(in srgb, var(--accent) 35%, var(--border)); } .working .phaseIcon { color: var(--accent); background: var(--accent-soft); }
+.done .phaseIcon { color: var(--success); background: color-mix(in srgb, var(--success) 8%, var(--surface)); }
+.arrow { color: var(--muted); font-size: 18px; }
+@media (max-width: 700px) { .wrap { grid-template-columns: 1fr; } .arrow { display: none; } }

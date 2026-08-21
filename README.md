@@ -206,25 +206,29 @@ The manifest intentionally uses explicit source masks so vendored `lwjson_stream
 
 ## Web Serial installer
 
-The `web/` directory contains a static Vite/React installer for Chromium-based desktop browsers. It uses the browser Web Serial API to talk directly to the Flipper Zero CLI over USB; no desktop bridge or server-side key upload is used. The installer:
+The `web/` directory contains a Vite/React **TypeScript/TSX** release installer for desktop Chromium browsers. It uses Web Serial to communicate directly with the canonical Flipper Zero USB CDC CLI and keeps the retail key local to the browser/device connection.
 
-- installs the release-channel FAP at `/ext/apps/NFC/amiibo_zero.fap`;
-- accepts the user's local 160-byte `key_retail.bin` and transfers it only over Web Serial to `/ext/apps_data/amiibo_zero/key_retail.bin`;
-- fetches the current `amiibo.json` and `games_info.json` from `https://dantheman827.github.io/AmiiboData/database/`;
-- parses each JSON response and re-serializes it with `JSON.stringify()` before transfer, removing formatting whitespace while validating that the download is valid JSON;
-- removes existing destination files before using Flipper's append-oriented `storage write_chunk` CLI command, then verifies the final file size with `storage stat`.
+Each install is prepared completely before the Flipper is modified: `release.json`, `amiibo.json`, and `games_info.json` are fetched with a current-timestamp cache buster; the two databases are parsed and minified; the release FAP is size/SHA-256 verified; and a native-compatible binary `amiibo.idx` is generated in browser memory from those exact minified UTF-8 bytes. The generator mirrors index v11's ARM layout, source fingerprints, byte offsets, bounded UTF-8 field behavior, sorting rules, variable-length categories, and game-reference records. Native `_Static_assert`s guard the shared ABI.
 
-The GitHub Actions FAP workflow also builds the web installer. Its web artifact always embeds the **release SDK-channel FAP produced by the same workflow run**. A GitHub Pages deployment happens only after the semantic-version tag run has successfully created the public GitHub Release, so normal pushes, pull requests, and manual development builds do not update the live Pages site.
+Once preparation succeeds, the installer attempts to close Amiibo if it is running, removes every active/temporary index artifact, then uploads and size-verifies the FAP, optional replacement key, both minified databases, and finally `amiibo.idx`. It launches `/ext/apps/NFC/amiibo_zero.fap` only after all transfers verify. A valid 160-byte `key_retail.bin` already on the Flipper is reused automatically.
+
+The serial layer monitors both the browser's Serial `disconnect` event and the underlying read stream, so unplugging the device immediately clears the UI's connected state. The page also includes a direct link to the exact release `.fap` embedded in the site for qFlipper/manual installation when Web Serial is unavailable.
+
+All React components live under `web/src/components/` as individual `.tsx` files with colocated scoped CSS Modules. Browser library code is also TSX; only global theme/reset rules live in `web/src/global.css`.
+
+The GitHub Actions FAP workflow builds and tests the web installer using the **release SDK-channel FAP produced by the same workflow run**. GitHub Pages is deployed only after a pushed semantic-version tag has successfully created the public GitHub Release, so normal pushes, pull requests, and manual development builds do not update the live Pages site.
 
 For local UI development:
 
 ```bash
 cd web
 npm install
+npm test
+npm run typecheck
 npm run dev
 ```
 
-Web Serial requires a secure context (`https://` or localhost) and a compatible desktop Chromium browser such as Chrome or Edge. See `web/README.md` for the transfer protocol and production-build details.
+Web Serial requires a secure context (`https://` or localhost) and a compatible desktop Chromium browser such as Chrome or Edge. See `web/README.md` for the exact index contract, transfer transaction, canonical Flipper references, and production-build details.
 
 ## Source layout
 

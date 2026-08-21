@@ -1,20 +1,26 @@
 {
-  "name": "amiibo-zero-installer",
+  "name": "amiibo-zero-web-installer",
   "private": true,
   "version": "0.1.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
-    "preview": "vite preview",
-    "test": "node --test"
+    "test": "tsx --test test/*.test.tsx",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview"
   },
   "dependencies": {
-    "react": "19.2.8",
-    "react-dom": "19.2.8"
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1"
   },
   "devDependencies": {
-    "@vitejs/plugin-react": "6.0.5",
-    "vite": "8.2.1"
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.1.10",
+    "@types/react-dom": "^19.1.7",
+    "@vitejs/plugin-react": "^5.0.2",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.3"
   }
 }

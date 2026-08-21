@@ -7,6 +7,7 @@
 #include "amiibo_db.h"
 #include "./third_party/lwjson/lwjson.h"
 
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -62,6 +63,7 @@ void az_db_remove_index_files(Storage* storage) {
     storage_common_remove(storage, AZ_INDEX_BACKUP);
     storage_common_remove(storage, AZ_INDEX_RAW);
     storage_common_remove(storage, AZ_INDEX_SORT_RUNS);
+    storage_common_remove(storage, AZ_INDEX_GAME_RAW);
 }
 
 /** @brief Compact fingerprint used to detect changes in a JSON source file. */
@@ -140,6 +142,21 @@ typedef struct {
     uint32_t json_offset; /**< Byte offset of the referenced game JSON object. */
     uint32_t json_length; /**< Byte length of the referenced game JSON object. */
 } AzIndexGameRef;
+
+/* Browser-side index generation depends on these ARM ABI serialization offsets. Keep the binary
+ * contract explicit so a future native layout change fails at build time instead of silently
+ * producing incompatible web-generated indexes. */
+_Static_assert(sizeof(AzSourceStamp) == 16U, "source stamp must stay 16 bytes");
+_Static_assert(sizeof(AzIndexHeader) == 80U, "index header must stay 80 bytes");
+_Static_assert(sizeof(AzIndexFigureRecord) == 112U, "figure record must stay 112 bytes");
+_Static_assert(sizeof(AzIndexGameRef) == 16U, "game ref must stay 16 bytes");
+_Static_assert(offsetof(AzFigure, id_hex) == 8U, "figure id_hex offset changed");
+_Static_assert(offsetof(AzFigure, name) == 25U, "figure name offset changed");
+_Static_assert(offsetof(AzFigure, release_na) == 89U, "figure release offset changed");
+_Static_assert(offsetof(AzFigure, category) == 101U, "figure category offset changed");
+_Static_assert(offsetof(AzFigure, type) == 102U, "figure type offset changed");
+_Static_assert(offsetof(AzFigure, json_offset) == 104U, "figure json offset field moved");
+_Static_assert(offsetof(AzFigure, json_length) == 108U, "figure json length field moved");
 
 /** @brief Shared stop and failure state for streaming JSON scans. */
 typedef struct {

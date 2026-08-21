@@ -1,0 +1,14 @@
+.header { height: 76px; display: flex; align-items: center; justify-content: space-between; max-width: 1180px; margin: 0 auto; padding: 0 28px; }
+.brand { display: flex; gap: 12px; align-items: center; color: var(--text); text-decoration: none; }
+.brandMark { width: 40px; height: 40px; display: grid; place-items: center; border-radius: 12px; font-weight: 800; letter-spacing: -.04em; color: white; background: linear-gradient(145deg, var(--accent), var(--accent-strong)); box-shadow: 0 8px 24px color-mix(in srgb, var(--accent) 28%, transparent); }
+.brandCopy { display: grid; line-height: 1.05; gap: 4px; }
+.brandCopy strong { font-size: 16px; }
+.brandCopy small { color: var(--muted); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
+.actions { display: flex; align-items: center; gap: 10px; }
+.connection { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); background: var(--surface); border: 1px solid var(--border); padding: 8px 12px; border-radius: 999px; font-size: 12px; font-weight: 650; }
+.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
+.connected { color: var(--success); }
+.connected .dot { background: var(--success); box-shadow: 0 0 0 4px color-mix(in srgb, var(--success) 13%, transparent); }
+.themeButton { width: 38px; height: 38px; display: grid; place-items: center; border: 1px solid var(--border); border-radius: 11px; background: var(--surface); color: var(--text); cursor: pointer; }
+.themeButton:hover { border-color: var(--border-strong); background: var(--surface-raised); }
+@media (max-width: 640px) { .header { padding: 0 18px; } .connection { display: none; } }

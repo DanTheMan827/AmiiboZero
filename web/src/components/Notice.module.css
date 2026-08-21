@@ -1,0 +1,7 @@
+.notice { display: flex; gap: 12px; align-items: flex-start; padding: 14px 16px; border-radius: 14px; border: 1px solid var(--border); background: var(--surface); color: var(--muted); }
+.notice strong, .notice span { display: block; }
+.notice strong { color: var(--text); margin-bottom: 3px; font-size: 13px; }
+.notice span { font-size: 12px; line-height: 1.55; }
+.error { border-color: color-mix(in srgb, var(--danger) 30%, var(--border)); background: color-mix(in srgb, var(--danger) 7%, var(--surface)); color: var(--danger); }
+.error strong { color: var(--danger); }
+.success { border-color: color-mix(in srgb, var(--success) 30%, var(--border)); background: color-mix(in srgb, var(--success) 7%, var(--surface)); color: var(--success); }

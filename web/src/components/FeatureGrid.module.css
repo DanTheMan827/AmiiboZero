@@ -1,0 +1,5 @@
+.grid { margin-top: 16px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.card { display: flex; align-items: flex-start; gap: 12px; padding: 17px; border: 1px solid var(--border); border-radius: 15px; background: var(--surface); color: var(--accent); }
+.card strong { display: block; color: var(--text); font-size: 11px; }
+.card p { margin: 5px 0 0; color: var(--muted); font-size: 10px; line-height: 1.55; }
+@media (max-width: 850px) { .grid { grid-template-columns: 1fr; } }

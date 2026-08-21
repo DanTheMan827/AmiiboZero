@@ -1,0 +1,4 @@
+.links { margin: 16px 0 32px; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; color: var(--muted); font-size: 10px; }
+.links strong { color: var(--text); }
+.links a { display: inline-flex; align-items: center; gap: 4px; color: var(--accent); text-decoration: none; }
+.links a:hover { text-decoration: underline; }

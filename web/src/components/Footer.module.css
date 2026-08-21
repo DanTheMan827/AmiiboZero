@@ -1,0 +1,2 @@
+.footer { max-width: 1180px; margin: 0 auto; padding: 22px 28px 30px; display: flex; justify-content: space-between; gap: 18px; color: var(--muted); font-size: 9px; border-top: 1px solid var(--border); }
+@media (max-width: 640px) { .footer { padding-inline: 18px; flex-direction: column; } }
